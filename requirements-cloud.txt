@@ -1,0 +1,2 @@
+# Dépendances supplémentaires pour le conteneur cloud (Linux uniquement).
+gunicorn>=22.0.0

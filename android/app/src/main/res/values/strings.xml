@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClipMaker</string>
+    <string name="server_hint">http://192.168.1.10:5000</string>
+    <string name="go">Aller</string>
+    <string name="reload">↻</string>
+</resources>

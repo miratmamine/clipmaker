@@ -1,0 +1,48 @@
+# Blueprint Render : interface web uniquement (plan gratuit, sans carte).
+#
+# Le calcul vidéo (yt-dlp, ffmpeg, Groq) tourne sur GitHub Actions : voir
+# .github/workflows/worker.yml. Cette image Flask ne fait qu'écrire des jobs
+# dans Supabase, déclencher le runner et signer les URL des clips.
+#
+# Création : Render → New → Blueprint → sélectionner ce dépôt → Apply.
+# Les valeurs marquées « sync: false » sont à saisir dans le tableau de bord
+# (Environment → Add from .env, en collant le fichier render-env.txt).
+services:
+  - type: web
+    name: clipmaker
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements-web.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 webapp:app
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Interface
+      - key: APP_PASSWORD
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      # File d'attente et stockage
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: clips
+      - key: SIGNED_URL_SECONDS
+        value: "3600"
+      - key: MAX_ACTIVE_JOBS
+        value: "2"
+      # Déclenchement du runner GitHub Actions
+      - key: GITHUB_REPO
+        sync: false
+      - key: GITHUB_DISPATCH_TOKEN
+        sync: false
+      - key: GITHUB_DISPATCH_EVENT
+        value: clipmaker-job

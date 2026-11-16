@@ -1,0 +1,7 @@
+# Dépendances des tests cloud (PostgreSQL embarqué pour test_store/worker).
+-r requirements.txt
+pgserver>=0.1.4
+# Publication GitHub + secrets Actions (scripts/setup_github.py).
+pynacl>=1.5
+# Vérification des fichiers YAML (test_deploy.py).
+pyyaml>=6.0

@@ -1,0 +1,12 @@
+.env
+.env.cloud
+.hf_token
+.gh_token
+render-env.txt
+work/
+output/
+cloud-data/
+.venv/
+__pycache__/
+*.pyc
+*.log

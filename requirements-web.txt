@@ -1,0 +1,8 @@
+# Interface cloud uniquement (Render, 512 Mo de RAM, sans ffmpeg).
+# Le calcul vidéo tourne sur GitHub Actions : voir .github/workflows/worker.yml
+# et requirements.txt (yt-dlp, faster-whisper, ffmpeg du runner).
+flask>=3.0.0
+gunicorn>=22.0.0
+httpx>=0.27.0
+psycopg[binary]>=3.2
+python-dotenv>=1.0.0

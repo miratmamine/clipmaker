@@ -1,0 +1,75 @@
+# Worker ClipMaker : télécharge la vidéo, transcrit chez Groq, découpe et
+# sous-titre les clips, puis les envoie dans Supabase Storage.
+#
+# Déclencheurs :
+# - repository_dispatch : envoyé par l'interface Render à chaque job
+#   (immédiat) ;
+# - workflow_dispatch : bouton « Run workflow » pour tester à la main ;
+# - schedule : filet de sécurité toutes les 15 minutes si le dispatch a échoué.
+#
+# Coût : gratuit et illimité sur un dépôt PUBLIC (2000 min/mois sur un dépôt
+# privé). Le job s'arrête en quelques secondes quand la file est vide.
+
+name: ClipMaker worker
+
+on:
+  repository_dispatch:
+    types: [clipmaker-job]
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONIOENCODING: utf-8
+      # Dossier de travail jetable du runner (vidéo, WAV, MP4 temporaires).
+      CLIPMAKER_DATA_DIR: ${{ runner.temp }}/clipmaker
+      # File d'attente et stockage (secrets du dépôt).
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_BUCKET: clips
+      # Transcription et sélection (Groq).
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_WHISPER_MODEL: whisper-large-v3-turbo
+      GROQ_RPM: "20"
+      GROQ_CHUNK_SECONDS: "600"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      # Rétention et reprise après incident.
+      RETENTION_DAYS: "14"
+      MAX_STORAGE_MB: "900"
+      JOB_RETENTION_DAYS: "60"
+      STALE_MINUTES: "15"
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Vérifier ffmpeg et les polices
+        run: |
+          ffmpeg -hide_banner -version | head -n 1
+          fc-list | grep -ci "liberation\|dejavu" || true
+
+      - name: Traiter un job
+        run: python worker.py --once
