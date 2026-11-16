@@ -96,6 +96,8 @@ assert "YTDLP_COOKIES_FILE" in str(cookies_steps[0].get("run", ""))
 assert "base64 -d" in str(cookies_steps[0].get("run", ""))
 assert "SOURCE_RETENTION_DAYS" in job["env"]
 assert "bgutil" in run_scripts
+assert "apt-get install" in run_scripts and "ffmpeg" in run_scripts
+assert "ffprobe -version" in run_scripts
 print("   OK")
 
 print("3. requirements-web.txt")

@@ -68,10 +68,18 @@ jobs:
           # Jeton PO YouTube (aide yt-dlp quand l'IP du runner est surveillée).
           pip install bgutil-ytdlp-pot-provider
 
+      - name: Installer ffmpeg et les polices
+        # L'image ubuntu-latest ne fournit plus ffmpeg/ffprobe : le pipeline en a
+        # besoin pour l'audio, la découpe et les sous-titres.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-liberation
+
       - name: Vérifier ffmpeg et les polices
         run: |
-          ffmpeg -hide_banner -version | head -n 1
-          fc-list | grep -ci "liberation\|dejavu" || true
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+          fc-list | grep -ci "liberation\|dejavu"
 
       - name: Installer les cookies YouTube (si configurés)
         env:
