@@ -1,0 +1,31 @@
+# Test temporaire : quels clients YouTube acceptent une IP de datacenter ?
+# À supprimer après diagnostic.
+name: Probe YouTube
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer yt-dlp
+        run: pip install --upgrade "yt-dlp>=2024.1.1"
+      - name: Tester les clients
+        run: |
+          URL="https://youtu.be/h6fcK_fRYaI"
+          for client in default ios mweb web_safari tv android web tv_simply; do
+            echo "=== $client"
+            if yt-dlp --simulate --no-warnings --quiet \
+                --extractor-args "youtube:player_client=$client" \
+                --print "%(format_id)s %(height)s" "$URL" > /tmp/out_$client.txt 2>/tmp/err_$client.txt; then
+              echo "OK ($(wc -l < /tmp/out_$client.txt) formats)"
+            else
+              echo "ECHEC"
+              tail -n 3 /tmp/err_$client.txt
+            fi
+          done
