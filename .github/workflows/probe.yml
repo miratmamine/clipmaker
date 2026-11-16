@@ -1,6 +1,6 @@
-# Test temporaire : quels clients YouTube acceptent une IP de datacenter ?
+# Test temporaire : contournements gratuits du blocage YouTube depuis GitHub.
 # À supprimer après diagnostic.
-name: Probe YouTube
+name: Probe YouTube 2
 
 on:
   workflow_dispatch:
@@ -8,24 +8,66 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Installer yt-dlp
-        run: pip install --upgrade "yt-dlp>=2024.1.1"
-      - name: Tester les clients
+
+      - name: A. Empreinte TLS (curl_cffi)
+        continue-on-error: true
+        run: |
+          pip install --upgrade "yt-dlp[default,curl-cffi]"
+          URL="https://youtu.be/h6fcK_fRYaI"
+          for imp in chrome safari firefox; do
+            echo "=== impersonate $imp"
+            yt-dlp --simulate --no-warnings --impersonate "$imp" \
+              --print "%(format_id)s %(height)s" "$URL" 2>&1 | tail -n 2
+          done
+
+      - name: B. Fournisseur de jetons PO (bgutil)
+        continue-on-error: true
         run: |
           URL="https://youtu.be/h6fcK_fRYaI"
-          for client in default ios mweb web_safari tv android web tv_simply; do
-            echo "=== $client"
-            if yt-dlp --simulate --no-warnings --quiet \
-                --extractor-args "youtube:player_client=$client" \
-                --print "%(format_id)s %(height)s" "$URL" > /tmp/out_$client.txt 2>/tmp/err_$client.txt; then
-              echo "OK ($(wc -l < /tmp/out_$client.txt) formats)"
-            else
-              echo "ECHEC"
-              tail -n 3 /tmp/err_$client.txt
-            fi
+          docker run -d --name bgutil -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest || true
+          sleep 8
+          docker logs bgutil 2>&1 | tail -n 5
+          pip install --upgrade bgutil-ytdlp-pot-provider "yt-dlp[default]"
+          for client in web default tv; do
+            echo "=== pot/$client"
+            yt-dlp --simulate --no-warnings \
+              --extractor-args "youtube:player_client=$client;fetch_pot=always" \
+              --print "%(format_id)s %(height)s" "$URL" 2>&1 | tail -n 2
           done
+
+      - name: C. Instances Invidious
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import json
+          import httpx
+
+          vid = "h6fcK_fRYaI"
+          try:
+              listing = httpx.get("https://api.invidious.io/instances.json", timeout=20).json()
+          except Exception as exc:
+              print("liste indisponible:", exc)
+              raise SystemExit(0)
+
+          hosts = []
+          for name, info in listing:
+              if info.get("type") != "https" or not info.get("api"):
+                  continue
+              hosts.append(info["uri"].rstrip("/"))
+          print(f"{len(hosts)} instances https avec API")
+
+          for host in hosts[:12]:
+              try:
+                  data = httpx.get(f"{host}/api/v1/videos/{vid}", timeout=15).json()
+              except Exception as exc:
+                  print(f"{host:<40} erreur {type(exc).__name__}")
+                  continue
+              streams = data.get("formatStreams") or []
+              adaptive = data.get("adaptiveFormats") or []
+              print(f"{host:<40} formats={len(streams)} adapt={len(adaptive)} titre={str(data.get('title'))[:30]}")
+          PY
