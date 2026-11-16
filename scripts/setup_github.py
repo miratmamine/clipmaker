@@ -231,9 +231,20 @@ def _push(full_name: str, token: str) -> None:
         check=False,
     )
     if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        if "workflow" in detail and "scope" in detail:
+            raise SystemExit(
+                "Le token GitHub n'a pas la portée « workflow », obligatoire "
+                "pour publier .github/workflows/worker.yml.\n\n"
+                "À faire (30 secondes, le token ne change pas) :\n"
+                "  1. https://github.com/settings/tokens\n"
+                "  2. cliquer sur le token utilisé → cocher « workflow »\n"
+                "  3. Update token, puis relancer cette commande.\n\n"
+                f"Détail GitHub : {detail[:300]}"
+            )
         raise SystemExit(
             "L'envoi a échoué :\n"
-            f"{(result.stderr or result.stdout).strip()[:800]}\n\n"
+            f"{detail[:800]}\n\n"
             "Vérifie que le token a bien la portée « repo » et qu'il n'a pas "
             "expiré (https://github.com/settings/tokens)."
         )
