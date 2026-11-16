@@ -1,6 +1,6 @@
-# Test temporaire : contournements gratuits du blocage YouTube depuis GitHub.
+# Test temporaire : instances Invidious / Piped depuis GitHub Actions.
 # À supprimer après diagnostic.
-name: Probe YouTube 2
+name: Probe YouTube 3
 
 on:
   workflow_dispatch:
@@ -8,66 +8,80 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: A. Empreinte TLS (curl_cffi)
-        continue-on-error: true
+      - name: Instances Invidious et Piped
         run: |
-          pip install --upgrade "yt-dlp[default,curl-cffi]"
-          URL="https://youtu.be/h6fcK_fRYaI"
-          for imp in chrome safari firefox; do
-            echo "=== impersonate $imp"
-            yt-dlp --simulate --no-warnings --impersonate "$imp" \
-              --print "%(format_id)s %(height)s" "$URL" 2>&1 | tail -n 2
-          done
-
-      - name: B. Fournisseur de jetons PO (bgutil)
-        continue-on-error: true
-        run: |
-          URL="https://youtu.be/h6fcK_fRYaI"
-          docker run -d --name bgutil -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest || true
-          sleep 8
-          docker logs bgutil 2>&1 | tail -n 5
-          pip install --upgrade bgutil-ytdlp-pot-provider "yt-dlp[default]"
-          for client in web default tv; do
-            echo "=== pot/$client"
-            yt-dlp --simulate --no-warnings \
-              --extractor-args "youtube:player_client=$client;fetch_pot=always" \
-              --print "%(format_id)s %(height)s" "$URL" 2>&1 | tail -n 2
-          done
-
-      - name: C. Instances Invidious
-        continue-on-error: true
-        run: |
+          pip install --quiet httpx
           python - <<'PY'
-          import json
           import httpx
 
-          vid = "h6fcK_fRYaI"
+          VID = "h6fcK_fRYaI"
+
+          def check(url: str) -> str:
+              try:
+                  r = httpx.get(url, headers={"Range": "bytes=0-2047"}, timeout=20,
+                                follow_redirects=True)
+              except Exception as exc:
+                  return f"erreur {type(exc).__name__}"
+              size = r.headers.get("content-range") or r.headers.get("content-length") or "?"
+              return f"HTTP {r.status_code} {len(r.content)} o ({size}) {r.headers.get('content-type','')[:30]}"
+
+          print("### Invidious")
           try:
-              listing = httpx.get("https://api.invidious.io/instances.json", timeout=20).json()
+              listing = httpx.get("https://api.invidious.io/instances.json", timeout=25).json()
+              hosts = [i["uri"].rstrip("/") for _, i in listing
+                       if i.get("type") == "https" and i.get("api")]
           except Exception as exc:
               print("liste indisponible:", exc)
-              raise SystemExit(0)
-
-          hosts = []
-          for name, info in listing:
-              if info.get("type") != "https" or not info.get("api"):
-                  continue
-              hosts.append(info["uri"].rstrip("/"))
-          print(f"{len(hosts)} instances https avec API")
-
-          for host in hosts[:12]:
+              hosts = ["https://inv.nadeko.net", "https://yewtu.be",
+                       "https://invidious.nerdvpn.de", "https://iv.melmac.space",
+                       "https://invidious.f5.si"]
+          print(f"{len(hosts)} candidates")
+          working = []
+          for host in hosts[:10]:
               try:
-                  data = httpx.get(f"{host}/api/v1/videos/{vid}", timeout=15).json()
+                  data = httpx.get(f"{host}/api/v1/videos/{VID}", timeout=20).json()
               except Exception as exc:
-                  print(f"{host:<40} erreur {type(exc).__name__}")
+                  print(f"{host:<38} api {type(exc).__name__}")
                   continue
-              streams = data.get("formatStreams") or []
-              adaptive = data.get("adaptiveFormats") or []
-              print(f"{host:<40} formats={len(streams)} adapt={len(adaptive)} titre={str(data.get('title'))[:30]}")
+              streams = [s for s in (data.get("formatStreams") or []) if s.get("url")]
+              print(f"{host:<38} api ok | mp4={len(streams)} | {str(data.get('title'))[:28]}")
+              if streams:
+                  url = max(streams, key=lambda s: int(s.get("height") or 0))["url"]
+                  print(f"    media: {check(url)}")
+                  working.append(host)
+          print("invidious fonctionnelles:", working)
+
+          print("### Piped")
+          piped = []
+          for url in ("https://piped-instances.kavin.rocks/",
+                      "https://raw.githubusercontent.com/TeamPiped/documentation/main/content/docs/public-instances/index.md"):
+              try:
+                  text = httpx.get(url, timeout=25).text
+              except Exception as exc:
+                  print("liste piped:", type(exc).__name__)
+                  continue
+              for token in text.replace('"', " ").replace(")", " ").split():
+                  token = token.strip(" ,[]<>")
+                  if token.startswith("https://") and "api" not in token:
+                      piped.append(token.rstrip("/"))
+              break
+          piped = sorted(set(piped))[:10]
+          print(f"{len(piped)} candidates piped")
+          for host in piped:
+              try:
+                  data = httpx.get(f"{host}/streams/{VID}", timeout=20).json()
+              except Exception as exc:
+                  print(f"{host:<38} api {type(exc).__name__}")
+                  continue
+              vids = [v for v in (data.get("videoStreams") or []) if not v.get("videoOnly")]
+              print(f"{host:<38} api ok | muxed={len(vids)} | {str(data.get('title'))[:28]}")
+              if vids:
+                  url = max(vids, key=lambda s: int(s.get("height") or 0))["url"]
+                  print(f"    media: {check(url)}")
           PY
