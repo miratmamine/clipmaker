@@ -26,6 +26,7 @@ clipmaker/
 ├── requirements-web.txt # dépendances de l'interface (sans ffmpeg)
 ├── scripts/setup_supabase.py # tables + bucket + test du stockage
 ├── scripts/setup_github.py   # dépôt + secrets Actions + render-env.txt
+├── scripts/setup_cookies.py  # cookies YouTube → secret Actions (optionnel)
 ├── Dockerfile           # image tout-en-un (ffmpeg + gunicorn + worker)
 ├── docker-compose.yml   # test cloud local
 ├── requirements.txt
@@ -226,6 +227,12 @@ depuis le téléphone même quand le PC est éteint :
 
 Le disque du runner est éphémère : chaque clip est envoyé dans Supabase Storage
 puis purgé automatiquement (14 jours et 900 Mo par défaut).
+
+YouTube bloque les adresses IP de datacenter (« Sign in to confirm you're not a
+bot ») : depuis le téléphone, l'interface propose aussi **« Ou envoyer une
+vidéo »** (MP4 téléchargé sur le téléphone, ≤ 45 Mo), ou l'ajout de **cookies
+YouTube** via `python scripts/setup_cookies.py cookies.txt`. Voir
+[docs/cloud.md](docs/cloud.md#5-récupérer-la-vidéo-quand-youtube-bloque).
 
 Déploiement pas à pas : **[docs/cloud.md](docs/cloud.md)**. Résumé :
 

@@ -46,6 +46,7 @@ for required in (
     assert env_vars[required].get("sync") is False, required
 # Render fournit PORT lui-même : le fichier .env ne doit pas l'écraser.
 assert "PORT" not in env_vars
+assert env_vars["MAX_UPLOAD_MB"]["value"] == "45"
 print("   OK")
 
 print("2. workflow GitHub Actions")
@@ -82,6 +83,19 @@ for key in (
     "OPENAI_API_KEY",
 ):
     assert job["env"][key].startswith("${{ secrets."), key
+# Sans cookies, YouTube refuse l'IP du runner : le secret doit être injecté et
+# écrit dans un fichier lu par yt-dlp (via YTDLP_COOKIES_FILE).
+cookies_steps = [
+    step
+    for step in job["steps"]
+    if "YOUTUBE_COOKIES" in str(step.get("env", {}))
+]
+assert cookies_steps, "étape cookies YouTube absente"
+assert cookies_steps[0]["env"]["YOUTUBE_COOKIES"].startswith("${{ secrets.")
+assert "YTDLP_COOKIES_FILE" in str(cookies_steps[0].get("run", ""))
+assert "base64 -d" in str(cookies_steps[0].get("run", ""))
+assert "SOURCE_RETENTION_DAYS" in job["env"]
+assert "bgutil" in run_scripts
 print("   OK")
 
 print("3. requirements-web.txt")
@@ -130,6 +144,52 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "DATABASE_URL=postgres://x" in content
     assert "GITHUB_REPO=moi/clipmaker" in content
     assert "GITHUB_DISPATCH_TOKEN=jeton" in content
+    assert "MAX_UPLOAD_MB=45" in content
+print("   OK")
+
+print("6. setup_cookies : validation du fichier Netscape")
+import setup_cookies  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    good = Path(tmp) / "cookies.txt"
+    good.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t1767225600\tSID\tvaleur\n"
+        ".google.com\tTRUE\t/\tTRUE\t1767225600\tNID\tvaleur\n",
+        encoding="utf-8",
+    )
+    content = setup_cookies.validate(good)
+    assert "SID" in content and content.endswith("\n")
+
+    empty = Path(tmp) / "vide.txt"
+    empty.write_text("", encoding="utf-8")
+    try:
+        setup_cookies.validate(empty)
+    except SystemExit as exc:
+        assert "vide" in str(exc)
+    else:
+        raise AssertionError("un fichier vide aurait dû être refusé")
+
+    other = Path(tmp) / "autre.txt"
+    other.write_text(
+        "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t1\tA\tb\n",
+        encoding="utf-8",
+    )
+    try:
+        setup_cookies.validate(other)
+    except SystemExit as exc:
+        assert "YouTube" in str(exc)
+    else:
+        raise AssertionError("un fichier sans cookie YouTube aurait dû être refusé")
+
+    broken = Path(tmp) / "casse.txt"
+    broken.write_text("youtube.com pas au format netscape\n", encoding="utf-8")
+    try:
+        setup_cookies.validate(broken)
+    except SystemExit as exc:
+        assert "Netscape" in str(exc)
+    else:
+        raise AssertionError("un format invalide aurait dû être refusé")
 print("   OK")
 
 print("\nTESTS DEPLOY OK")

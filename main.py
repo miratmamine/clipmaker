@@ -214,6 +214,7 @@ def _run(
     clip_transcriber: Callable[[str, float, float, str, list[dict]], list[dict]]
     | None = None,
     on_clip: Callable[[dict, Path], None] | None = None,
+    source: str | None = None,
 ) -> int:
     """Exécute le pipeline complet et retourne un code de sortie.
 
@@ -228,7 +229,9 @@ def _run(
       du passage avec des timestamps relatifs à son début ;
     - ``on_clip(clip, path)`` est appelé après chaque clip réussi (par exemple
       pour l'envoyer dans un stockage objet). Une exception y est traitée comme
-      un échec du clip.
+      un échec du clip ;
+    - ``source`` court-circuite le téléchargement : chemin d'une vidéo déjà
+      disponible (envoi depuis le téléphone).
     """
     _configure_console()
 
@@ -242,20 +245,24 @@ def _run(
     # 1. Téléchargement (ou réutilisation du fichier déjà présent).
     print(f"[1/{TOTAL_STEPS}] Téléchargement de la vidéo...")
     video: str | None = None
-    try:
-        video = find_downloaded(url)
-    except (DownloadError, OSError):
-        video = None
-
-    if video is not None:
-        print(f"      Vidéo déjà téléchargée, réutilisation : {_display_path(video)}")
+    if source:
+        video = source
+        print(f"      Vidéo fournie, téléchargement ignoré : {_display_path(video)}")
     else:
         try:
-            video = download(url)
-        except DownloadError as exc:
-            print(f"Erreur de téléchargement : {exc}", file=sys.stderr)
-            return 1
-        print(f"      Téléchargée : {_display_path(video)}")
+            video = find_downloaded(url)
+        except (DownloadError, OSError):
+            video = None
+
+        if video is not None:
+            print(f"      Vidéo déjà téléchargée, réutilisation : {_display_path(video)}")
+        else:
+            try:
+                video = download(url)
+            except DownloadError as exc:
+                print(f"Erreur de téléchargement : {exc}", file=sys.stderr)
+                return 1
+            print(f"      Téléchargée : {_display_path(video)}")
 
     # 2. Transcription complète (ou réutilisation du JSON existant).
     print(f"[2/{TOTAL_STEPS}] Transcription de la vidéo...")

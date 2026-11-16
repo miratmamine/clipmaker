@@ -196,6 +196,32 @@ def _clip_index(path: Path) -> int:
         return 0
 
 
+def _source_from_storage(job: dict) -> Path | None:
+    """Récupère la vidéo envoyée depuis le téléphone (``upload://…``)."""
+    key = storage.source_object(str(job.get("url") or ""))
+    if not key:
+        return None
+
+    name = Path(key).name or "video.mp4"
+    suffix = Path(name).suffix if Path(name).suffix in storage.VIDEO_SUFFIXES else ".mp4"
+    dest = WORK_DIR / f"upload_{str(job['id'])[:8]}{suffix}"
+    _log(f"      Vidéo envoyée depuis le téléphone : récupération de {name}...")
+    path = storage.download_file(key, dest)
+    _log(f"      Récupérée ({path.stat().st_size / 1_000_000:.1f} Mo).")
+    return path
+
+
+def _drop_source(job: dict) -> None:
+    """Supprime la vidéo source du bucket (elle n'a plus d'utilité)."""
+    key = storage.source_object(str(job.get("url") or ""))
+    if not key:
+        return
+    try:
+        storage.delete_file(key)
+    except storage.StorageError as exc:
+        _log(f"      Vidéo source non supprimée : {exc}")
+
+
 def _make_on_clip(job_id: str):
     """Retourne le callback qui envoie chaque clip dans Supabase Storage."""
 
@@ -237,10 +263,12 @@ def process_job(job: dict) -> str:
     _clean_dir(OUTPUT_DIR)
     try:
         with _Heartbeat(job_id), redirect_stdout(sink), redirect_stderr(sink):
+            source = _source_from_storage(job)
             exit_code = main._run(
                 job["url"],
                 int(job["clips"]),
                 results=results,
+                source=str(source) if source is not None else None,
                 transcriber=groq_transcriber.transcribe,
                 clip_transcriber=lambda video, start, end, label, segments: (
                     groq_transcriber.slice_segments(segments, start, end)
@@ -271,6 +299,7 @@ def process_job(job: dict) -> str:
         except store.StoreError as exc:
             _log(f"Impossible de finaliser le job {job_id} : {exc}")
 
+        _drop_source(job)
         _clean_dir(OUTPUT_DIR)
         _clean_dir(WORK_DIR)
         CURRENT_JOB_ID = None
@@ -279,6 +308,56 @@ def process_job(job: dict) -> str:
             f"{len(failures)} échec(s)."
         )
         return status
+
+
+def _purge_sources() -> int:
+    """Supprime les vidéos téléversées restées après un plantage du runner."""
+    retention_days = max(1, _env_int("SOURCE_RETENTION_DAYS", 3))
+    try:
+        active = store.active_source_keys()
+    except store.StoreError:
+        return 0
+
+    busy = {key.split("/")[1] for key in active if key.count("/") >= 1}
+    now = datetime.now(timezone.utc)
+    removed = 0
+
+    try:
+        folders = storage.list_objects(storage.SOURCE_PREFIX)
+    except storage.StorageError as exc:
+        _log(f"      Purge : liste des vidéos envoyées impossible : {exc}")
+        return 0
+
+    for folder in folders:
+        token = str(folder.get("name") or "")
+        if not token or token in busy:
+            continue
+        prefix = f"{storage.SOURCE_PREFIX}/{token}"
+        try:
+            files = storage.list_objects(prefix)
+        except storage.StorageError:
+            continue
+        for item in files:
+            created = item.get("created_at") or item.get("updated_at")
+            if not created:
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if (now - stamp).total_seconds() / 86400 < retention_days:
+                continue
+            try:
+                storage.delete_file(f"{prefix}/{item.get('name')}")
+                removed += 1
+            except storage.StorageError:
+                continue
+
+    if removed:
+        _log(f"Purge : {removed} vidéo(s) envoyée(s) supprimée(s).")
+    return removed
 
 
 def purge_storage() -> int:
@@ -329,6 +408,11 @@ def purge_storage() -> int:
         removed_jobs = store.purge_jobs(_env_int("JOB_RETENTION_DAYS", 60))
     except store.StoreError:
         removed_jobs = 0
+
+    try:
+        _purge_sources()
+    except storage.StorageError as exc:
+        _log(f"      Purge des vidéos envoyées impossible : {exc}")
 
     if removed or removed_jobs:
         _log(

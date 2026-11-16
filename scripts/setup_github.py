@@ -48,6 +48,7 @@ WORKER_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
+    "YOUTUBE_COOKIES",
 )
 
 # Variables à coller dans Render (jamais dans le dépôt)
@@ -321,6 +322,7 @@ def _write_render_env(full_name: str, token: str, values: dict[str, str]) -> Non
             "GITHUB_DISPATCH_EVENT=clipmaker-job",
             "SIGNED_URL_SECONDS=3600",
             "MAX_ACTIVE_JOBS=2",
+            "MAX_UPLOAD_MB=45",
         ]
     )
     RENDER_ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")

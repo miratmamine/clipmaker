@@ -15,8 +15,9 @@ sans rien payer et sans saisir de carte bancaire.
 
 ```text
 téléphone ──► Render (Flask) ──► PostgreSQL Supabase (table jobs)
-                    │                      ▲
-                    │ repository_dispatch  │ job réclamé / terminé
+    │               │                      ▲
+    │   envoi vidéo │ repository_dispatch  │ job réclamé / terminé
+    └──► Supabase Storage (sources)        │
                     ▼                      │
              GitHub Actions (worker) ──────┘
                     │
@@ -115,6 +116,10 @@ Le script :
   `OPENAI_MODEL`) ;
 - écrit `render-env.txt` (à coller dans Render à l'étape suivante).
 
+Les cookies YouTube sont facultatifs et s'ajoutent à part (voir la section 5) :
+`python scripts/setup_cookies.py cookies.txt` enregistre le secret
+`YOUTUBE_COOKIES`.
+
 > **Dépôt public ou privé ?** Public = minutes Actions illimitées (le code ne
 > contient aucun secret). Privé = 2000 min/mois, largement suffisant pour un
 > usage personnel, mais il faut passer `--private`.
@@ -133,7 +138,61 @@ Chaque exécution lance `python worker.py --once` : elle réclame **un** job, le
 traite, puis s'arrête. Si la file est vide, le job GitHub dure quelques
 secondes.
 
-## 5. Render (l'interface)
+## 5. Récupérer la vidéo quand YouTube bloque
+
+Testé en vrai : depuis une adresse IP de datacenter (GitHub Actions), YouTube
+répond « Sign in to confirm you're not a bot » **quel que soit le réglage**
+(8 clients yt-dlp, empreintes TLS `curl_cffi`, jetons PO `bgutil`, instances
+Invidious/Piped). Le blocage vient de l'adresse IP, pas de l'outil. Deux
+méthodes fonctionnent, et elles se complètent.
+
+### A. Envoyer la vidéo depuis le téléphone (toujours fiable)
+
+1. Télécharger la vidéo sur le téléphone (site ou application au choix), en MP4
+   de préférence.
+2. Sur la page d'accueil de ClipMaker, utiliser le formulaire **« Ou envoyer une
+   vidéo »**, choisir le fichier et lancer.
+
+Le fichier passe par Render puis est déposé dans Supabase Storage
+(`sources/<jeton>/<fichier>`), le job est créé avec `upload://…`, et le runner
+le récupère depuis Storage. La vidéo source est supprimée dès la fin du job ;
+en cas de plantage du runner, elle est purgée après `SOURCE_RETENTION_DAYS`
+(3 jours par défaut).
+
+> - Limite : **50 Mo par fichier** dans Supabase Storage, donc
+>   `MAX_UPLOAD_MB=45` par défaut (ajustable si le bucket est agrandi).
+> - La vidéo traverse deux fois la bande passante Render (envoi puis lecture par
+>   le runner) : 5 Go/mois ≈ 2 h 30 de vidéo à 8 Mo/min.
+> - Aucune dépendance à YouTube : c'est la méthode de secours permanente.
+
+### B. Cookies YouTube (automatique)
+
+1. Se connecter à YouTube dans un navigateur (un **compte jetable** est
+   conseillé).
+2. Exporter les cookies de `youtube.com` au format Netscape (extension « Get
+   cookies.txt LOCALLY », ou `yt-dlp --cookies-from-browser firefox`).
+3. Enregistrer le secret :
+
+```powershell
+.\.venv\Scripts\python.exe scripts\setup_cookies.py cookies.txt
+```
+
+Le script vérifie le format, encode le fichier et l'enregistre dans le secret
+`YOUTUBE_COOKIES` (limite GitHub : **48 Ko**). Le workflow le décode dans un
+fichier temporaire et `downloader.py` le passe à yt-dlp
+(`YTDLP_COOKIES_FILE`).
+
+> Les cookies expirent souvent en 1 à 3 mois (relancer la commande avec un
+> fichier frais). Même avec des cookies, Google peut refuser une IP de
+> datacenter : garder la méthode A sous la main. Sans cookies, l'erreur
+> affichée dans le journal propose justement l'envoi depuis le téléphone.
+
+### C. Dernier recours : le PC
+
+`python worker.py --once` traite un job de la file depuis le PC (avec
+`.env.cloud`) : l'IP résidentielle passe généralement là où GitHub échoue.
+
+## 6. Render (l'interface)
 
 1. Créer un compte sur <https://render.com> en choisissant **GitHub** comme
    moyen de connexion (gratuit, aucune carte demandée).
@@ -152,53 +211,55 @@ Adresse publique : `https://<nom>.onrender.com`. En cas de doute, l'onglet
 > Le service gratuit s'endort après 15 minutes sans visite : la première page
 > met alors ~1 minute à s'afficher. Le traitement, lui, continue sur GitHub.
 
-## 6. Depuis le téléphone
+## 7. Depuis le téléphone
 
 1. Ouvrir l'adresse Render dans le navigateur du téléphone.
 2. Se connecter avec `APP_PASSWORD`.
-3. Coller une URL YouTube, choisir 1 à 10 clips, lancer.
+3. **Méthode YouTube** : coller une URL, choisir 1 à 10 clips, lancer (utile si
+   les cookies fonctionnent). **Méthode envoi** : formulaire « Ou envoyer une
+   vidéo », fichier + nombre de clips.
 4. La page se rafraîchit et affiche la progression, puis les clips (lus depuis
-   Supabase via une URL signée d'une heure).
+   Supabase via une URL signée d'une heure). Un job issu d'un envoi affiche
+   « Vidéo envoyée depuis le téléphone » à la place de l'URL.
 5. Pour l'APK : télécharger `ClipMaker.apk` depuis la page, l'installer, puis
    saisir l'adresse Render.
 
-## 7. Fonctionnement interne
+## 8. Fonctionnement interne
 
 - `webapp.py` détecte `DATABASE_URL` : en mode cloud, un lancement insère un
-  job `queued` dans PostgreSQL, puis appelle `repository_dispatch`.
+  job `queued` dans PostgreSQL, puis appelle `repository_dispatch`. La route
+  `/upload` enregistre d'abord la vidéo dans Supabase Storage et crée un job
+  `upload://sources/<jeton>/<fichier>`.
 - `worker.py --once` remet en file les jobs bloqués (`heartbeat_at` trop
-  ancien), réclame un job avec `FOR UPDATE SKIP LOCKED`, exécute `main._run`
-  avec la transcription Groq, envoie chaque MP4 dans Supabase Storage et
-  enregistre le clip.
+  ancien), réclame un job avec `FOR UPDATE SKIP LOCKED`, récupère la vidéo
+  (téléchargement yt-dlp, ou Storage pour un envoi), exécute `main._run` avec la
+  transcription Groq, envoie chaque MP4 dans Supabase Storage et enregistre le
+  clip. La vidéo source est supprimée à la fin.
 - La transcription complète est faite **une seule fois**, puis découpée par
   clip (`groq_transcriber.slice_segments`) : un seul appel Groq par vidéo.
 - Les MP4 sont purgés après `RETENTION_DAYS` (14 jours) et au-delà de
   `MAX_STORAGE_MB` (900 Mo) ; les jobs terminés après `JOB_RETENTION_DAYS`
-  (60 jours).
+  (60 jours) ; les vidéos envoyées orphelines après `SOURCE_RETENTION_DAYS`
+  (3 jours).
 - L'interface ne télécharge rien et n'encode rien : elle ne dépend pas de
   ffmpeg (voir `requirements-web.txt`).
 
-## 8. Quotas et limites
+## 9. Quotas et limites
 
 | Service | Limite | Conséquence |
 | --- | --- | --- |
 | Render | 750 h/mois, 512 Mo, 0,1 CPU | veille après 15 min ; ~1 min de réveil |
-| Render | 5 Go de bande passante/mois | les téléchargements de clips comptent |
+| Render | 5 Go de bande passante/mois | chaque envoi de vidéo consomme ~2× sa taille |
 | GitHub Actions | 6 h max par job | une vidéo de plusieurs heures peut être coupée |
 | Supabase | pause après 7 jours sans activité | `/healthz` et le healthcheck Render génèrent de l'activité |
-| Supabase | 1 Go de stockage, bucket 50 Mo/fichier | un clip de 60 s pèse 6 à 10 Mo |
+| Supabase | 1 Go de stockage, bucket 50 Mo/fichier | un clip de 60 s pèse 6 à 10 Mo ; `MAX_UPLOAD_MB=45` |
 | Groq | 7 200 s/h, 28 800 s/jour | privilégier des vidéos de moins d'une heure |
 
-Les runners GitHub utilisent des adresses IP de datacenter : YouTube peut
-répondre « Sign in to confirm you're not a bot ». `downloader.py` réessaie
-alors automatiquement avec d'autres clients (`tv_simply`, `android_vr`,
-`web_embedded`). Si le blocage persiste, deux solutions :
+Les runners GitHub utilisent des adresses IP de datacenter : YouTube bloque
+presque toujours le téléchargement (voir la section 5). Utiliser l'envoi depuis
+le téléphone, les cookies, ou le worker du PC.
 
-- relancer depuis le téléphone plus tard (l'IP change) ;
-- exécuter le job sur le PC : `python worker.py --once` traite un job de la
-  file avec `.env.cloud` (et `python worker.py` en continu).
-
-## 9. Dépannage
+## 10. Dépannage
 
 | Symptôme | Cause probable | Solution |
 | --- | --- | --- |
@@ -207,6 +268,9 @@ alors automatiquement avec d'autres clients (`tv_simply`, `android_vr`,
 | `401` / `403` sur `/run` | mot de passe absent ou faux | se reconnecter, vérifier `APP_PASSWORD` |
 | `Impossible de créer le traitement` | base injoignable ou en pause | réveiller le projet Supabase, vérifier `DATABASE_URL` |
 | Erreur `404 model_not_found` | modèle Groq retiré | mettre à jour `OPENAI_MODEL` |
+| « YouTube demande une vérification anti-robot » | IP de datacenter bloquée | envoyer la vidéo depuis le téléphone, ou `scripts/setup_cookies.py` |
+| « Vidéo trop lourde » | au-delà de `MAX_UPLOAD_MB` | compresser la vidéo (≤ 45 Mo) ou augmenter la limite du bucket |
+| Envoi bloqué vers Render | fichier trop gros / réseau coupé | réessayer en Wi-Fi ; vérifier l'espace Supabase |
 | Clip en `502` | URL signée expirée (1 h) | recharger la page du job |
 | `Aucun secret` dans Render | `render-env.txt` non collé | Environment → Add from .env |
 
@@ -217,7 +281,7 @@ Storage simulés) :
 python test_cloud.py
 ```
 
-## 10. Variante « tout-en-un » (VPS, Docker, PC)
+## 11. Variante « tout-en-un » (VPS, Docker, PC)
 
 Pour un serveur qui reste allumé, `Dockerfile` + `start_cloud.sh` lancent
 gunicorn **et** le worker en boucle dans le même conteneur (ffmpeg inclus).

@@ -1,5 +1,6 @@
-# Worker ClipMaker : télécharge la vidéo, transcrit chez Groq, découpe et
-# sous-titre les clips, puis les envoie dans Supabase Storage.
+# Worker ClipMaker : transcrit chez Groq, découpe et sous-titre les clips, puis
+# les envoie dans Supabase Storage. Il travaille sur une vidéo YouTube ou sur
+# une vidéo envoyée depuis le téléphone (bucket Supabase).
 #
 # Déclencheurs :
 # - repository_dispatch : envoyé par l'interface Render à chaque job
@@ -45,6 +46,7 @@ jobs:
       # Rétention et reprise après incident.
       RETENTION_DAYS: "14"
       MAX_STORAGE_MB: "900"
+      SOURCE_RETENTION_DAYS: "3"
       JOB_RETENTION_DAYS: "60"
       STALE_MINUTES: "15"
 
@@ -63,11 +65,31 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Jeton PO YouTube (aide yt-dlp quand l'IP du runner est surveillée).
+          pip install bgutil-ytdlp-pot-provider
 
       - name: Vérifier ffmpeg et les polices
         run: |
           ffmpeg -hide_banner -version | head -n 1
           fc-list | grep -ci "liberation\|dejavu" || true
+
+      - name: Installer les cookies YouTube (si configurés)
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            printf '%s' "$YOUTUBE_COOKIES" | base64 -d > "$RUNNER_TEMP/cookies.txt"
+            echo "YTDLP_COOKIES_FILE=$RUNNER_TEMP/cookies.txt" >> "$GITHUB_ENV"
+            echo "Cookies YouTube installés."
+          else
+            echo "Aucun cookie YouTube : téléchargement direct (souvent bloqué)."
+          fi
+
+      - name: Démarrer le fournisseur de jetons PO
+        continue-on-error: true
+        run: |
+          docker run -d --name bgutil -p 4416:4416 \
+            brainicism/bgutil-ytdlp-pot-provider:latest || true
 
       - name: Traiter un job
         # Le contexte « runner » n'est autorisé qu'au niveau d'une étape.

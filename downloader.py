@@ -73,8 +73,9 @@ def _friendly_error(exc: Exception, url: str) -> str:
     if "not a bot" in message or "confirm you" in message:
         return (
             "YouTube demande une vérification anti-robot, fréquente depuis une "
-            "adresse de serveur. Réessaie plus tard, ou lance le traitement "
-            f"depuis le PC : python main.py {url}"
+            "adresse de serveur. Réessaie plus tard, envoie la vidéo depuis le "
+            "téléphone (formulaire « Envoyer une vidéo »), ou lance le "
+            f"traitement depuis le PC : python main.py {url}"
         )
     if "private" in message:
         return "La vidéo est privée et ne peut pas être téléchargée."
@@ -233,6 +234,12 @@ def _extract(url: str, client: str | None) -> str:
     }
     if client:
         options["extractor_args"] = {"youtube": {"player_client": [client]}}
+
+    # Cookies d'un compte YouTube (secret YOUTUBE_COOKIES du runner) : c'est le
+    # seul moyen fiable de télécharger depuis une IP de datacenter.
+    cookies = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if cookies and Path(cookies).is_file():
+        options["cookiefile"] = cookies
 
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)

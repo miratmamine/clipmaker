@@ -134,6 +134,20 @@ def active_count() -> int:
     return int(rows[0]["total"]) if rows else 0
 
 
+def active_source_keys() -> list[str]:
+    """Clés Storage des vidéos encore utiles (jobs en attente ou en cours)."""
+    rows = _query(
+        "select url from jobs where status in ('queued', 'running') "
+        "and url like %s",
+        ("upload://%",),
+    )
+    return [
+        str(row.get("url") or "")[len("upload://") :].strip()
+        for row in rows
+        if str(row.get("url") or "").strip()
+    ]
+
+
 def claim_job() -> dict | None:
     """Réclame le plus ancien job en attente, atomiquement."""
     rows = _query(

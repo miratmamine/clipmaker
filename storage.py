@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import unicodedata
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +20,11 @@ import httpx
 
 DEFAULT_BUCKET = "clips"
 DEFAULT_EXPIRES = 3600
+# Préfixe des vidéos envoyées depuis le téléphone (supprimées après usage).
+SOURCE_PREFIX = "sources"
+# Schéma utilisé dans jobs.url pour désigner un objet du bucket au lieu d'un lien.
+UPLOAD_SCHEME = "upload://"
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 
 
 class StorageError(Exception):
@@ -92,40 +98,67 @@ def _detail(response: httpx.Response) -> str:
     return str(payload)[:300]
 
 
+def _slug(text: str, limit: int = 80) -> str:
+    """Réduit un texte à un identifiant ASCII sans espace ni accent."""
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_text).strip("._-")
+    return re.sub(r"_+", "_", slug)[:limit].rstrip("._-")
+
+
 def safe_key(job_id: str, index: int, filename: str) -> str:
     """Construit une clé de stockage ASCII : ``<job>/01_titre.mp4``."""
-    stem = Path(filename).stem
-    stem = re.sub(r"^\d{2,}_", "", stem)
-    normalized = unicodedata.normalize("NFKD", stem)
-    ascii_stem = normalized.encode("ascii", "ignore").decode("ascii")
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_stem).strip("._-")
-    slug = re.sub(r"_+", "_", slug)[:80].rstrip("._-") or "clip"
+    stem = _slug(re.sub(r"^\d{2,}_", "", Path(filename).stem)) or "clip"
     job = re.sub(r"[^A-Za-z0-9-]+", "", str(job_id))[:40] or "job"
-    return f"{job}/{int(index):02d}_{slug}.mp4"
+    return f"{job}/{int(index):02d}_{stem}.mp4"
 
 
-def upload_file(path: str | Path, key: str) -> str:
+def source_key(filename: str) -> str:
+    """Clé d'une vidéo envoyée depuis le téléphone (jeton aléatoire)."""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in VIDEO_SUFFIXES:
+        suffix = ".mp4"
+    stem = _slug(Path(filename).stem, 60) or "video"
+    return f"{SOURCE_PREFIX}/{secrets.token_hex(8)}/{stem}{suffix}"
+
+
+def source_object(url: str) -> str:
+    """Retourne la clé Storage d'une URL ``upload://…`` (sinon chaîne vide)."""
+    text = (url or "").strip()
+    if not text.lower().startswith(UPLOAD_SCHEME):
+        return ""
+    return text[len(UPLOAD_SCHEME) :].strip()
+
+
+def upload_file(
+    path: str | Path, key: str, content_type: str = "video/mp4"
+) -> str:
     """Envoie un fichier dans le bucket privé (écrase si la clé existe)."""
     file = Path(path)
     if not file.is_file():
         raise StorageError(f"Fichier à envoyer introuvable : {str(file)!r}")
 
-    headers = _headers("video/mp4")
+    headers = _headers(content_type)
     headers["x-upsert"] = "true"
 
     try:
-        payload = file.read_bytes()
+        size = file.stat().st_size
     except OSError as exc:
         raise StorageError(f"Lecture impossible de {str(file)!r} : {exc}") from exc
+    if size == 0:
+        raise StorageError(f"Le fichier {file.name!r} est vide.")
 
+    # Envoi en flux : un MP4 de plusieurs centaines de Mo ne passe pas en RAM
+    # sur un hébergement gratuit (512 Mo).
     try:
-        response = httpx.post(
-            _object_url(key),
-            headers=headers,
-            content=payload,
-            timeout=httpx.Timeout(300.0, connect=30.0),
-        )
-    except httpx.HTTPError as exc:
+        with file.open("rb") as handle:
+            response = httpx.post(
+                _object_url(key),
+                headers={**headers, "Content-Length": str(size)},
+                content=handle,
+                timeout=httpx.Timeout(900.0, connect=30.0),
+            )
+    except (httpx.HTTPError, OSError) as exc:
         raise StorageError(f"Envoi vers Supabase Storage impossible : {exc}") from exc
 
     if response.status_code not in (200, 201):
@@ -134,6 +167,71 @@ def upload_file(path: str | Path, key: str) -> str:
             f"(HTTP {response.status_code}) : {_detail(response)}"
         )
     return key
+
+
+def download_file(key: str, dest: str | Path) -> Path:
+    """Télécharge un objet du bucket vers ``dest`` et retourne son chemin."""
+    if not key:
+        raise StorageError("Clé de stockage vide : impossible de récupérer la vidéo.")
+
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with httpx.stream(
+            "GET",
+            _object_url(key),
+            headers=_headers(),
+            timeout=httpx.Timeout(900.0, connect=30.0),
+            follow_redirects=True,
+        ) as response:
+            if response.status_code != 200:
+                response.read()
+                raise StorageError(
+                    f"Supabase Storage n'a pas renvoyé {key!r} "
+                    f"(HTTP {response.status_code}) : {_detail(response)}"
+                )
+            with target.open("wb") as handle:
+                for chunk in response.iter_bytes(1 << 20):
+                    handle.write(chunk)
+    except httpx.HTTPError as exc:
+        raise StorageError(f"Téléchargement depuis Supabase impossible : {exc}") from exc
+    except OSError as exc:
+        raise StorageError(f"Écriture impossible dans {str(target)!r} : {exc}") from exc
+
+    if target.stat().st_size == 0:
+        raise StorageError(f"Le fichier reçu pour {key!r} est vide.")
+    return target
+
+
+def list_objects(prefix: str, limit: int = 1000) -> list[dict]:
+    """Liste les objets sous ``prefix`` (nom relatif + date de création)."""
+    url = f"{_base_url()}/storage/v1/object/list/{quote(bucket(), safe='')}"
+    try:
+        response = httpx.post(
+            url,
+            headers=_headers("application/json"),
+            json={
+                "prefix": prefix,
+                "limit": int(limit),
+                "offset": 0,
+                "sortBy": {"column": "created_at", "order": "asc"},
+            },
+            timeout=httpx.Timeout(60.0, connect=15.0),
+        )
+    except httpx.HTTPError as exc:
+        raise StorageError(f"Liste du stockage impossible : {exc}") from exc
+
+    if response.status_code != 200:
+        raise StorageError(
+            f"Supabase Storage a refusé la liste (HTTP {response.status_code}) : "
+            f"{_detail(response)}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise StorageError("Réponse de liste illisible.") from exc
+    return payload if isinstance(payload, list) else []
+
 
 
 def signed_url(key: str, expires: int = DEFAULT_EXPIRES) -> str:

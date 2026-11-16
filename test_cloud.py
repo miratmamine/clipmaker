@@ -10,6 +10,7 @@ générée par ffmpeg. Aucun accès réseau externe n'est nécessaire.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -216,6 +217,34 @@ class StorageHandler(QuietHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if self.path.endswith("/object/list/clips"):
+            payload = json.loads(body or b"{}")
+            prefix = str(payload.get("prefix") or "").strip("/")
+            entries: dict[str, dict] = {}
+            for key, data in sorted(StorageHandler.uploads.items()):
+                rest = key[len(prefix) :].lstrip("/") if prefix else key
+                if prefix and not key.startswith(prefix):
+                    continue
+                if not rest:
+                    continue
+                name = rest.split("/", 1)[0]
+                entries.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "id": None,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "metadata": {"size": len(data)},
+                    },
+                )
+            data = json.dumps(list(entries.values())).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if "/object/sign/clips/" in self.path:
             key = self.path.split("/object/sign/clips/", 1)[1]
             data = json.dumps(
@@ -250,12 +279,34 @@ class StorageHandler(QuietHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         payload = json.loads(body or b"{}")
-        StorageHandler.deletes.extend(payload.get("prefixes", []))
+        for key in payload.get("prefixes", []):
+            StorageHandler.deletes.append(key)
+            StorageHandler.uploads.pop(key, None)
         data = b"[]"
         self.send_response(200)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        marker = "/object/clips/"
+        if marker in self.path:
+            key = self.path.split(marker, 1)[1].split("?", 1)[0]
+            body = StorageHandler.uploads.get(key)
+            if body is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 storage_httpd, storage_url = start_server(StorageHandler)
@@ -278,6 +329,23 @@ except storage.StorageError as exc:
     assert "refusé" in str(exc)
 else:
     raise AssertionError("un refus Storage aurait dû lever StorageError")
+
+source = storage.source_key("Ma Vidéo (finale).MP4")
+assert source.startswith("sources/") and source.endswith("/Ma_Video_finale.mp4"), source
+assert storage.source_object(f"{storage.UPLOAD_SCHEME}{source}") == source
+assert storage.source_object("https://youtu.be/x") == ""
+assert storage.upload_file(sample, source) == source
+assert storage.source_object(
+    f"{storage.UPLOAD_SCHEME}{source}"
+) in StorageHandler.uploads
+assert len(storage.list_objects("sources")) == 1
+assert storage.list_objects(f"sources/{source.split('/')[1]}")[0]["name"].endswith(
+    ".mp4"
+)
+restored = storage.download_file(source, TEMP / "restored.mp4")
+assert restored.read_bytes() == b"video-bytes"
+assert storage.delete_file(source)
+assert source not in StorageHandler.uploads
 print("   OK")
 
 # --- Pipeline complet avec backends injectés (ffmpeg réel) --------------------
@@ -336,6 +404,9 @@ import worker  # noqa: E402
 print("5. Worker")
 worker.configure_dirs()
 uploads: list[tuple[str, str]] = []
+sources: list[str | None] = []
+real_upload_file = storage.upload_file
+real_delete_file = storage.delete_file
 
 
 def fake_upload(path, storage_key):
@@ -350,6 +421,11 @@ worker.storage.delete_file = lambda storage_key: True  # type: ignore[assignment
 def fake_run(url, clips, results=None, **kwargs):
     print("[1/5] Téléchargement simulé")
     print("      ligne de journal worker")
+    sources.append(kwargs.get("source"))
+    if kwargs.get("source"):
+        # Vérifie que la vidéo envoyée depuis le téléphone a bien été récupérée.
+        data = Path(str(kwargs["source"])).read_bytes()
+        assert data == b"contenu-video", data
     on_clip = kwargs.get("on_clip")
     successes = []
     for index in (1, 2):
@@ -511,6 +587,68 @@ os.environ.pop("GITHUB_DISPATCH_TOKEN", None)
 assert "Aucun runner" in webapp.dispatch_runner("abc")
 webapp.httpx.post = original_post  # type: ignore[assignment]
 print("   OK")
+
+# --- Envoi depuis le téléphone ----------------------------------------------
+print("6c. Envoi d'une vidéo depuis le téléphone")
+# Le worker utilise ici le vrai Storage (serveur simulé) : envoi, liste, relecture.
+worker.storage.upload_file = real_upload_file  # type: ignore[assignment]
+worker.storage.delete_file = real_delete_file  # type: ignore[assignment]
+webapp.storage.upload_file = real_upload_file  # type: ignore[assignment]
+webapp.storage.delete_file = real_delete_file  # type: ignore[assignment]
+
+uploaded = client.post(
+    "/upload",
+    data={
+        "clips": "1",
+        "video": (io.BytesIO(b"contenu-video"), "ma video (test).mp4"),
+    },
+    content_type="multipart/form-data",
+)
+assert uploaded.status_code == 302, uploaded.status_code
+upload_id = uploaded.headers["Location"].rstrip("/").split("/")[-1]
+upload_job = store.get_job(upload_id)
+assert upload_job is not None and upload_job["status"] == "queued", upload_job
+upload_key = storage.source_object(str(upload_job["url"]))
+assert upload_key.startswith("sources/"), upload_key
+assert StorageHandler.uploads[upload_key] == b"contenu-video"
+assert "envoyée depuis le téléphone" in (upload_job["log"] or "")
+page = client.get(f"/job/{upload_id}")
+assert page.status_code == 200
+assert "Vidéo envoyée depuis le téléphone".encode("utf-8") in page.data
+
+# Les jobs de l'interface web sont encore en file : on les clôt pour réclamer
+# celui de l'envoi (claim_job prend le plus ancien).
+for stale in (web_job_id, dispatch_id):
+    row = store.get_job(stale)
+    if row and row["status"] in ("queued", "running"):
+        store.finish_job(stale, "done", "", 0)
+
+claimed_upload = store.claim_job()
+assert claimed_upload is not None and str(claimed_upload["id"]) == upload_id
+worker.main._run = fake_run  # type: ignore[assignment]
+worker.process_job(claimed_upload)
+assert sources[-1] and "upload_" in str(sources[-1]), sources[-1]
+assert Path(str(sources[-1])).parent == worker.WORK_DIR
+assert store.get_job(upload_id)["status"] == "done"
+assert upload_key not in StorageHandler.uploads, "la vidéo source devrait être supprimée"
+assert upload_key in StorageHandler.deletes
+print("   OK")
+
+print("6d. Purge des vidéos envoyées orphelines")
+orphan = storage.source_key("orphelin.mp4")
+storage.upload_file(TEMP / "restored.mp4", orphan)
+active_key = storage.source_key("actif.mp4")
+storage.upload_file(TEMP / "restored.mp4", active_key)
+active_job = store.create_job(f"{storage.UPLOAD_SCHEME}{active_key}", 1)
+
+assert worker._purge_sources() == 1
+assert active_key in StorageHandler.uploads, "une vidéo en attente ne doit pas être purgée"
+
+store.finish_job(str(active_job["id"]), "done", "", 0)
+assert worker._purge_sources() == 1
+assert active_key not in StorageHandler.uploads
+print("   OK")
+
 
 assert client.get("/logout").status_code == 302
 print("   OK")

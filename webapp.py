@@ -22,9 +22,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import mimetypes
 import os
 import secrets
+import shutil
 import socket
+import tempfile
 import threading
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
@@ -82,7 +85,13 @@ else:  # pragma: no cover - dépend de l'environnement
     store = None  # type: ignore[assignment]
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+# Supabase Storage accepte 50 Mo maximum par fichier sur le plan gratuit : la
+# vidéo envoyée depuis le téléphone passe par le bucket, d'où cette limite.
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "45"))
+# En mode cloud, l'interface accepte l'envoi d'une vidéo depuis le téléphone.
+app.config["MAX_CONTENT_LENGTH"] = (
+    (MAX_UPLOAD_MB + 5) * 1_000_000 if CLOUD else 1024 * 1024
+)
 _app_password_value = os.getenv("APP_PASSWORD", "").strip()
 _env_secret = os.getenv("SECRET_KEY", "").strip()
 if _env_secret:
@@ -279,6 +288,14 @@ def _recent_jobs(limit: int = 8) -> list[dict]:
         ]
 
 
+def _display_url(url: str) -> str:
+    """Rend lisible une URL de job (les envois n'ont pas de lien YouTube)."""
+    text = (url or "").strip()
+    if CLOUD and storage is not None and storage.source_object(text):
+        return "Vidéo envoyée depuis le téléphone"
+    return text
+
+
 def _cloud_job_view(job: dict, clips: list[dict]) -> dict:
     outputs = []
     for clip in clips:
@@ -295,7 +312,7 @@ def _cloud_job_view(job: dict, clips: list[dict]) -> dict:
 
     return {
         "id": str(job["id"]),
-        "url": job.get("url", ""),
+        "url": _display_url(str(job.get("url", ""))),
         "clips": job.get("clips", 0),
         "status": STATUS_FR.get(str(job.get("status")), str(job.get("status"))),
         "error": job.get("error", ""),
@@ -312,7 +329,7 @@ def _cloud_recent_jobs(limit: int = 10) -> list[dict]:
     return [
         {
             "id": str(job["id"]),
-            "url": job.get("url", ""),
+            "url": _display_url(str(job.get("url", ""))),
             "clips": job.get("clips", 0),
             "status": STATUS_FR.get(str(job.get("status")), str(job.get("status"))),
             "started_at": _fmt_date(job.get("started_at") or job.get("created_at")),
@@ -400,6 +417,7 @@ def _home(error: str = "", status: int = 200):
             apk=APK_PATH.is_file(),
             cloud=False,
             auth=bool(_app_password()),
+            max_upload_mb=MAX_UPLOAD_MB,
         ),
         status,
     )
@@ -424,6 +442,7 @@ def _cloud_home(error: str = "", status: int = 200):
             apk=APK_PATH.is_file(),
             cloud=True,
             auth=bool(_app_password()),
+            max_upload_mb=MAX_UPLOAD_MB,
         ),
         status,
     )
@@ -480,6 +499,12 @@ def logout():
     return redirect(url_for("login"))
 
 
+@app.errorhandler(413)
+def too_large(error):  # noqa: ARG001
+    message = f"Vidéo trop lourde : la limite est de {MAX_UPLOAD_MB} Mo."
+    return _cloud_home(message, 413) if CLOUD else _home(message, 413)
+
+
 @app.get("/healthz")
 def healthz():
     if not CLOUD:
@@ -500,29 +525,37 @@ def index():
     return _home()
 
 
+def _parse_clips(raw: object) -> int | str:
+    """Valide le nombre de clips ; retourne un message d'erreur en cas d'échec."""
+    try:
+        clips = int(str(raw or "5").strip())
+    except ValueError:
+        return "Le nombre de clips doit être un entier."
+    if not 1 <= clips <= 10:
+        return "Le nombre de clips doit être compris entre 1 et 10."
+    return clips
+
+
+def _active_jobs_full() -> bool:
+    limit = int(os.getenv("MAX_ACTIVE_JOBS", "5"))
+    return store.active_count() >= max(1, limit)
+
+
 @app.post("/run")
 def run_job():
     url = (request.form.get("url") or "").strip()
-    clips_raw = (request.form.get("clips") or "5").strip()
+    clips = _parse_clips(request.form.get("clips"))
 
     if not url:
         return _cloud_home("Colle une URL YouTube.", 400) if CLOUD else _home(
             "Colle une URL YouTube.", 400
         )
-
-    try:
-        clips = int(clips_raw)
-    except ValueError:
-        message = "Le nombre de clips doit être un entier."
-        return _cloud_home(message, 400) if CLOUD else _home(message, 400)
-    if not 1 <= clips <= 10:
-        message = "Le nombre de clips doit être compris entre 1 et 10."
-        return _cloud_home(message, 400) if CLOUD else _home(message, 400)
+    if isinstance(clips, str):
+        return _cloud_home(clips, 400) if CLOUD else _home(clips, 400)
 
     if CLOUD:
         try:
-            limit = int(os.getenv("MAX_ACTIVE_JOBS", "5"))
-            if store.active_count() >= max(1, limit):
+            if _active_jobs_full():
                 return _cloud_home(
                     "Trop de traitements en attente. Réessaie dans quelques minutes.",
                     429,
@@ -553,6 +586,73 @@ def run_job():
     return redirect(url_for("job_page", job_id=job.id))
 
 
+@app.post("/upload")
+def upload_job():
+    """Reçoit une vidéo depuis le téléphone et lance le traitement (cloud)."""
+    if not CLOUD:
+        abort(404)
+
+    clips = _parse_clips(request.form.get("clips"))
+    if isinstance(clips, str):
+        return _cloud_home(clips, 400)
+
+    try:
+        if _active_jobs_full():
+            return _cloud_home(
+                "Trop de traitements en attente. Réessaie dans quelques minutes.",
+                429,
+            )
+    except store.StoreError as exc:
+        return _cloud_home(f"Base de données indisponible : {exc}", 503)
+
+    upload = request.files.get("video")
+    if upload is None or not upload.filename:
+        return _cloud_home("Choisis une vidéo à envoyer.", 400)
+
+    filename = Path(upload.filename).name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in storage.VIDEO_SUFFIXES:
+        return _cloud_home(
+            "Format non reconnu : choisis un fichier MP4, MKV, WEBM ou MOV.", 400
+        )
+
+    key = storage.source_key(filename)
+    temp_dir = Path(tempfile.mkdtemp(prefix="clipmaker_upload_"))
+    temp_path = temp_dir / f"video{suffix}"
+    size_mb = 0.0
+    try:
+        upload.save(str(temp_path))
+        size_mb = temp_path.stat().st_size / 1_000_000
+        if size_mb <= 0:
+            return _cloud_home("Le fichier reçu est vide.", 400)
+        content_type = mimetypes.guess_type(filename)[0] or "video/mp4"
+        storage.upload_file(temp_path, key, content_type=content_type)
+    except OSError as exc:
+        return _cloud_home(f"Enregistrement impossible : {exc}", 500)
+    except storage.StorageError as exc:
+        return _cloud_home(f"Envoi impossible : {exc}", 503)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    try:
+        job = store.create_job(f"{storage.UPLOAD_SCHEME}{key}", clips)
+    except store.StoreError as exc:
+        try:
+            storage.delete_file(key)
+        except storage.StorageError:
+            pass
+        return _cloud_home(f"Impossible de créer le traitement : {exc}", 503)
+
+    try:
+        store.append_log(
+            str(job["id"]), f"Vidéo envoyée depuis le téléphone ({size_mb:.1f} Mo)."
+        )
+        store.append_log(str(job["id"]), dispatch_runner(str(job["id"])))
+    except store.StoreError:
+        pass
+    return redirect(url_for("job_page", job_id=str(job["id"])))
+
+
 @app.get("/job/<job_id>")
 def job_page(job_id: str):
     if CLOUD:
@@ -573,6 +673,7 @@ def job_page(job_id: str):
             apk=False,
             cloud=True,
             auth=bool(_app_password()),
+            max_upload_mb=MAX_UPLOAD_MB,
         )
 
     with JOBS_LOCK:
@@ -589,6 +690,7 @@ def job_page(job_id: str):
         apk=False,
         cloud=False,
         auth=bool(_app_password()),
+        max_upload_mb=MAX_UPLOAD_MB,
     )
 
 
@@ -884,6 +986,20 @@ PAGE = """\
       <button type="submit" {% if busy %}disabled{% endif %}>Lancer le traitement</button>
     </form>
   </div>
+
+  {% if cloud %}
+  <div class="card">
+    <h2>Ou envoyer une vidéo</h2>
+    <p class="muted">Si YouTube refuse le serveur, télécharge la vidéo sur le téléphone puis envoie-la ici (MP4, MKV, WEBM ou MOV, {{ max_upload_mb }} Mo max).</p>
+    <form method="post" action="{{ url_for('upload_job') }}" enctype="multipart/form-data">
+      <label for="video">Fichier vidéo</label>
+      <input id="video" name="video" type="file" accept="video/*" required>
+      <label for="upload_clips">Nombre de clips (1 à 10)</label>
+      <input id="upload_clips" name="clips" type="number" min="1" max="10" value="5">
+      <button type="submit">Envoyer et lancer</button>
+    </form>
+  </div>
+  {% endif %}
 
   {% if jobs %}
   <div class="card">
