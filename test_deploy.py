@@ -63,9 +63,17 @@ assert "schedule" in triggers
 job = workflow["jobs"]["clip"]
 assert job["runs-on"] == "ubuntu-latest"
 assert job["timeout-minutes"] >= 60
+# Le contexte « runner » n'existe qu'au niveau d'une étape : GitHub rejette le
+# fichier entier s'il apparaît dans jobs.<id>.env.
+for name, value in job["env"].items():
+    assert "${{ runner." not in str(value), name
 run_scripts = "\n".join(str(step.get("run", "")) for step in job["steps"])
 assert "python worker.py --once" in run_scripts
 assert "-r requirements.txt" in run_scripts
+worker_step = next(
+    step for step in job["steps"] if "worker.py --once" in str(step.get("run", ""))
+)
+assert "CLIPMAKER_DATA_DIR" in worker_step["env"]
 for key in (
     "DATABASE_URL",
     "SUPABASE_URL",

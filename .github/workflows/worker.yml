@@ -29,8 +29,6 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONIOENCODING: utf-8
-      # Dossier de travail jetable du runner (vidéo, WAV, MP4 temporaires).
-      CLIPMAKER_DATA_DIR: ${{ runner.temp }}/clipmaker
       # File d'attente et stockage (secrets du dépôt).
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -72,4 +70,7 @@ jobs:
           fc-list | grep -ci "liberation\|dejavu" || true
 
       - name: Traiter un job
+        # Le contexte « runner » n'est autorisé qu'au niveau d'une étape.
+        env:
+          CLIPMAKER_DATA_DIR: ${{ runner.temp }}/clipmaker
         run: python worker.py --once
