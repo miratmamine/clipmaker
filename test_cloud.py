@@ -509,6 +509,25 @@ assert bad.status_code == 401
 ok = client.post("/login", data={"password": "motdepasse", "next": "/"})
 assert ok.status_code == 302
 
+# Sur Render, avant que render-env.txt soit collé : le service doit démarrer et
+# afficher une explication, pas planter sur l'import de yt-dlp.
+saved_database_url = os.environ.pop("DATABASE_URL")
+try:
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.json["status"] == "config", health.json
+
+    original_list_jobs = webapp.store.list_jobs
+    webapp.store.list_jobs = lambda limit=10: (_ for _ in ()).throw(  # type: ignore[assignment]
+        webapp.store.StoreError("base absente")
+    )
+    config_page = client.get("/")
+    assert config_page.status_code == 200
+    assert b"render-env.txt" in config_page.data
+    webapp.store.list_jobs = original_list_jobs  # type: ignore[assignment]
+finally:
+    os.environ["DATABASE_URL"] = saved_database_url
+
 created = client.post(
     "/run", data={"url": "https://youtu.be/web", "clips": "1"}
 )

@@ -70,7 +70,14 @@ _load_cloud_env()
 OUTPUT_DIR = BASE_DIR / "output"
 APK_PATH = BASE_DIR / "ClipMaker.apk"
 
-CLOUD = bool(os.getenv("DATABASE_URL", "").strip())
+# Sur Render, l'interface est toujours en mode cloud : si DATABASE_URL manque
+# encore (variables pas collées), l'application doit démarrer et afficher une
+# erreur claire, pas importer yt-dlp/ffmpeg (absents de requirements-web.txt).
+ON_RENDER = any(
+    os.getenv(name, "").strip()
+    for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_EXTERNAL_HOSTNAME")
+)
+CLOUD = bool(os.getenv("DATABASE_URL", "").strip() or ON_RENDER)
 if CLOUD:
     import storage
     import store
@@ -429,7 +436,14 @@ def _cloud_home(error: str = "", status: int = 200):
         db_error = ""
     except store.StoreError as exc:
         jobs = []
-        db_error = f"Base de données indisponible : {exc}"
+        if not os.getenv("DATABASE_URL", "").strip():
+            db_error = (
+                "Configuration incomplète : dans Render, ouvre Environment → "
+                "Add from .env, colle le contenu de render-env.txt puis "
+                "Save changes."
+            )
+        else:
+            db_error = f"Base de données indisponible : {exc}"
 
     return (
         render_template_string(
@@ -509,6 +523,13 @@ def too_large(error):  # noqa: ARG001
 def healthz():
     if not CLOUD:
         response = jsonify(status="ok", mode="local")
+        response.headers["Cache-Control"] = "no-store"
+        return response, 200
+
+    if not os.getenv("DATABASE_URL", "").strip():
+        # Variables pas encore collées dans Render : le service doit rester
+        # « live » pour afficher la page d'explication au lieu d'échouer.
+        response = jsonify(status="config", mode="cloud")
         response.headers["Cache-Control"] = "no-store"
         return response, 200
 
