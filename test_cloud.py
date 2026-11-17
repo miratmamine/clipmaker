@@ -509,6 +509,14 @@ assert bad.status_code == 401
 ok = client.post("/login", data={"password": "motdepasse", "next": "/"})
 assert ok.status_code == 302
 
+# Le navigateur du téléphone refuse un fichier trop lourd avant l'envoi, avec
+# la limite réelle injectée par le serveur.
+home = client.get("/")
+assert home.status_code == 200
+assert 'id="upload_info"' in home.get_data(as_text=True)
+assert "trop lourd" in home.get_data(as_text=True)
+assert f"var limit = {webapp.MAX_UPLOAD_MB};" in home.get_data(as_text=True)
+
 # Sur Render, avant que render-env.txt soit collé : le service doit démarrer et
 # afficher une explication, pas planter sur l'import de yt-dlp.
 saved_database_url = os.environ.pop("DATABASE_URL")

@@ -201,9 +201,21 @@ fichier temporaire et `downloader.py` le passe à yt-dlp
    Francfort, santé sur `/healthz`.
 3. Ouvrir le service → **Environment** → **Add from .env**, ouvrir
    `render-env.txt` et coller tout son contenu, puis **Save changes**.
+
+   Si Render a créé un **Env Group** (page *Env Groups*) au lieu de coller
+   directement dans le service, il faut aussi le lier : service →
+   **Environment** → section **Environment Groups** → **Link Environment
+   Group** → choisir le groupe → **Save changes**. Un groupe non lié n'a
+   aucun effet et `/healthz` reste sur `{"status":"config"}`.
+
 4. Attendre la fin du déploiement (statut **Live**), puis ouvrir
    `https://<nom>.onrender.com/healthz` : la réponse doit être
    `{"mode":"cloud","status":"ok"}`.
+
+> Tant que les variables manquent, le service démarre quand même : la page
+> affiche « Configuration incomplète » et `/healthz` répond
+> `{"mode":"cloud","status":"config"}`. C'est volontaire : gunicorn ne
+> plante plus sur l'import de `yt-dlp`.
 
 Adresse publique : `https://<nom>.onrender.com`. En cas de doute, l'onglet
 **Logs** affiche les erreurs de démarrage.
@@ -272,7 +284,8 @@ le téléphone, les cookies, ou le worker du PC.
 | « Vidéo trop lourde » | au-delà de `MAX_UPLOAD_MB` | compresser la vidéo (≤ 45 Mo) ou augmenter la limite du bucket |
 | Envoi bloqué vers Render | fichier trop gros / réseau coupé | réessayer en Wi-Fi ; vérifier l'espace Supabase |
 | Clip en `502` | URL signée expirée (1 h) | recharger la page du job |
-| `Aucun secret` dans Render | `render-env.txt` non collé | Environment → Add from .env |
+| « Configuration incomplète » sur la page d'accueil | `DATABASE_URL` absent dans Render | Environment → Add from .env (ou lier l'Env Group au service) |
+| `/healthz` répond `config` | variables non enregistrées | coller `render-env.txt`, **Save changes**, attendre le redémarrage |
 
 Vérifier l'installation sans rien déployer (PostgreSQL embarqué + Groq et
 Storage simulés) :

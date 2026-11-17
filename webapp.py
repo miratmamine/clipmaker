@@ -1012,13 +1012,51 @@ PAGE = """\
   <div class="card">
     <h2>Ou envoyer une vidéo</h2>
     <p class="muted">Si YouTube refuse le serveur, télécharge la vidéo sur le téléphone puis envoie-la ici (MP4, MKV, WEBM ou MOV, {{ max_upload_mb }} Mo max).</p>
-    <form method="post" action="{{ url_for('upload_job') }}" enctype="multipart/form-data">
+    <form id="upload_form" method="post" action="{{ url_for('upload_job') }}" enctype="multipart/form-data">
       <label for="video">Fichier vidéo</label>
       <input id="video" name="video" type="file" accept="video/*" required>
+      <p class="muted" id="upload_info"></p>
       <label for="upload_clips">Nombre de clips (1 à 10)</label>
       <input id="upload_clips" name="clips" type="number" min="1" max="10" value="5">
       <button type="submit">Envoyer et lancer</button>
     </form>
+    <script>
+      // Évite d'envoyer 200 Mo pour découvrir ensuite que la limite est 45 Mo.
+      (function () {
+        var form = document.getElementById("upload_form");
+        var input = document.getElementById("video");
+        var info = document.getElementById("upload_info");
+        var limit = {{ max_upload_mb }};
+        function check() {
+          var file = input.files && input.files[0];
+          if (!file) { info.textContent = ""; return true; }
+          var mb = file.size / 1000000;
+          if (mb > limit) {
+            info.textContent = "Fichier : " + mb.toFixed(1)
+              + " Mo — trop lourd (limite " + limit
+              + " Mo). Compresse-le ou choisis un autre fichier.";
+            info.style.color = "#ff9a9a";
+            return false;
+          }
+          info.textContent = "Fichier : " + mb.toFixed(1) + " Mo, prêt à envoyer.";
+          info.style.color = "";
+          return true;
+        }
+        input.addEventListener("change", check);
+        form.addEventListener("submit", function (event) {
+          if (!check()) {
+            event.preventDefault();
+            info.scrollIntoView({ block: "center" });
+            return;
+          }
+          var button = form.querySelector("button[type=submit]");
+          if (button) {
+            button.disabled = true;
+            button.textContent = "Envoi en cours… ne ferme pas la page";
+          }
+        });
+      })();
+    </script>
   </div>
   {% endif %}
 
