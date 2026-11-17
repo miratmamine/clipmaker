@@ -2,7 +2,11 @@
 .env.cloud
 .hf_token
 .gh_token
+.render_token
 render-env.txt
+# Cookies de navigateur : jamais dans git (ils valent un mot de passe).
+cookies*.txt
+*_cookies.txt
 work/
 output/
 cloud-data/
