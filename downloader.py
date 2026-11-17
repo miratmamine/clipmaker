@@ -241,6 +241,12 @@ def _extract(url: str, client: str | None) -> str:
     if cookies and Path(cookies).is_file():
         options["cookiefile"] = cookies
 
+    # Proxy résidentiel (secret YTDLP_PROXY) : YouTube bloque les adresses de
+    # datacenter ; passer par une box/mobile résidentielle lève ce blocage.
+    proxy = os.getenv("YTDLP_PROXY", "").strip()
+    if proxy:
+        options["proxy"] = proxy
+
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
         if info is None:

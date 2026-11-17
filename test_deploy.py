@@ -95,6 +95,9 @@ assert cookies_steps[0]["env"]["YOUTUBE_COOKIES"].startswith("${{ secrets.")
 assert "YTDLP_COOKIES_FILE" in str(cookies_steps[0].get("run", ""))
 assert "base64 -d" in str(cookies_steps[0].get("run", ""))
 assert "SOURCE_RETENTION_DAYS" in job["env"]
+# Proxy résidentiel optionnel : seule parade durable au blocage des datacenters.
+assert job["env"]["YTDLP_PROXY"].startswith("${{ secrets.")
+assert 'os.getenv("YTDLP_PROXY"' in (PROJECT / "downloader.py").read_text(encoding="utf-8")
 assert "bgutil" in run_scripts
 assert "apt-get install" in run_scripts and "ffmpeg" in run_scripts
 assert "ffprobe -version" in run_scripts

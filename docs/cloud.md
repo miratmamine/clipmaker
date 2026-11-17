@@ -192,6 +192,39 @@ fichier temporaire et `downloader.py` le passe à yt-dlp
 `python worker.py --once` traite un job de la file depuis le PC (avec
 `.env.cloud`) : l'IP résidentielle passe généralement là où GitHub échoue.
 
+### D. Éviter le blocage « pour de bon » : proxy résidentiel
+
+YouTube ne bloque pas ClipMaker : il bloque les **adresses IP de datacenter**
+(GitHub Actions, Render, VPS). Aucune option gratuite ne lève ce blocage de
+façon permanente — la seule parade technique durable est de faire sortir le
+téléchargement par une connexion résidentielle ou mobile.
+
+`downloader.py` lit la variable `YTDLP_PROXY` et la transmet à yt-dlp
+(`http://user:motdepasse@hote:port`). Côté GitHub Actions, elle vient du secret
+`YTDLP_PROXY` :
+
+```powershell
+# une seule fois : enregistrer le proxy dans les secrets Actions
+$env:GH_TOKEN = (Get-Content .gh_token -Raw).Trim()
+gh secret set YTDLP_PROXY --repo miratmamine/clipmaker
+```
+
+Hiérarchie des solutions, de la plus fiable à la plus fragile :
+
+| Solution | Coût | Fiabilité | Remarque |
+| --- | --- | --- | --- |
+| A. Envoi depuis le téléphone | 0 | 100 % | toujours disponible, ~2 min de plus |
+| D. Proxy résidentiel | ~3–10 $/mois | élevée | seul vrai correctif « automatique » |
+| B. Cookies YouTube | 0 | variable | améliore les chances, expire en 1–3 mois |
+| C. PC allumé / vieux téléphone en proxy | 0 | élevée si allumé | dépend d'une machine à la maison |
+| Clients yt-dlp, PO token, Piped/Invidious | 0 | nulle depuis un datacenter | déjà testés, abandonnés |
+
+> Astuce 100 % gratuite si tu as un vieux téléphone Android : le laisser
+> branché en Wi-Fi, y installer une app de proxy HTTP (ou Termux + `tinyproxy`)
+> et mettre son adresse dans `YTDLP_PROXY`. L'IP devient celle de l'opérateur
+> mobile, que YouTube bloque beaucoup moins. C'est plus fragile qu'un proxy
+> payant, mais ça ne coûte rien.
+
 ## 6. Render (l'interface)
 
 1. Créer un compte sur <https://render.com> en choisissant **GitHub** comme

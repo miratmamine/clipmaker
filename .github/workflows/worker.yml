@@ -49,6 +49,9 @@ jobs:
       SOURCE_RETENTION_DAYS: "3"
       JOB_RETENTION_DAYS: "60"
       STALE_MINUTES: "15"
+      # Proxy résidentiel optionnel (secret YTDLP_PROXY) : seule parade durable
+      # au blocage des adresses de datacenter par YouTube.
+      YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
 
     steps:
       - name: Récupérer le code
