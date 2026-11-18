@@ -230,8 +230,8 @@ puis purgé automatiquement (14 jours et 900 Mo par défaut).
 
 YouTube bloque les adresses IP de datacenter (« Sign in to confirm you're not a
 bot ») : depuis le téléphone, l'interface propose aussi **« Ou envoyer une
-vidéo »** (MP4 téléchargé sur le téléphone, ≤ 45 Mo), ou l'ajout de **cookies
-YouTube** via `python scripts/setup_cookies.py cookies.txt`. Voir
+vidéo »** (MP4 téléchargé sur le téléphone, ≤ 500 Mo, envoyé par morceaux de
+40 Mo pour respecter la limite Supabase de 50 Mo/fichier). Voir
 [docs/cloud.md](docs/cloud.md#5-récupérer-la-vidéo-quand-youtube-bloque).
 
 Déploiement pas à pas : **[docs/cloud.md](docs/cloud.md)**. Résumé :

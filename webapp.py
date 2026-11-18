@@ -22,8 +22,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import math
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -93,11 +95,13 @@ else:  # pragma: no cover - dépend de l'environnement
 
 app = Flask(__name__)
 # Supabase Storage accepte 50 Mo maximum par fichier sur le plan gratuit : la
-# vidéo envoyée depuis le téléphone passe par le bucket, d'où cette limite.
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "45"))
+# vidéo est donc envoyée en morceaux de 40 Mo puis réassemblée par le worker.
+# MAX_UPLOAD_MB = taille TOTALE autorisée ; MAX_CHUNK_MB = taille par requête.
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+MAX_CHUNK_MB = min(45, max(1, int(os.getenv("MAX_CHUNK_MB", "40"))))
 # En mode cloud, l'interface accepte l'envoi d'une vidéo depuis le téléphone.
 app.config["MAX_CONTENT_LENGTH"] = (
-    (MAX_UPLOAD_MB + 5) * 1_000_000 if CLOUD else 1024 * 1024
+    (MAX_CHUNK_MB + 5) * 1_000_000 if CLOUD else 1024 * 1024
 )
 _app_password_value = os.getenv("APP_PASSWORD", "").strip()
 _env_secret = os.getenv("SECRET_KEY", "").strip()
@@ -425,6 +429,7 @@ def _home(error: str = "", status: int = 200):
             cloud=False,
             auth=bool(_app_password()),
             max_upload_mb=MAX_UPLOAD_MB,
+            chunk_size_bytes=MAX_CHUNK_MB * 1_000_000,
         ),
         status,
     )
@@ -457,6 +462,7 @@ def _cloud_home(error: str = "", status: int = 200):
             cloud=True,
             auth=bool(_app_password()),
             max_upload_mb=MAX_UPLOAD_MB,
+            chunk_size_bytes=MAX_CHUNK_MB * 1_000_000,
         ),
         status,
     )
@@ -515,7 +521,11 @@ def logout():
 
 @app.errorhandler(413)
 def too_large(error):  # noqa: ARG001
-    message = f"Vidéo trop lourde : la limite est de {MAX_UPLOAD_MB} Mo."
+    message = (
+        f"Morceau trop lourd : la limite est de {MAX_CHUNK_MB} Mo "
+        f"par requête (la vidéo totale peut atteindre {MAX_UPLOAD_MB} Mo, "
+        "elle est envoyée par morceaux)."
+    )
     return _cloud_home(message, 413) if CLOUD else _home(message, 413)
 
 
@@ -674,6 +684,137 @@ def upload_job():
     return redirect(url_for("job_page", job_id=str(job["id"])))
 
 
+def _json_error(message: str, status: int):
+    """Réponse JSON pour les étapes d'envoi par morceaux (appelées en JS)."""
+    return jsonify(error=message), status
+
+
+def _upload_token() -> str:
+    token = str(request.form.get("token") or "").strip().lower()
+    return token if re.fullmatch(r"[0-9a-f]{16}", token) else ""
+
+
+@app.post("/upload/start")
+def upload_start():
+    """Prépare un envoi par morceaux et retourne le jeton à utiliser."""
+    if not CLOUD:
+        abort(404)
+
+    name = Path(str(request.form.get("name") or "")).name
+    if Path(name).suffix.lower() not in storage.VIDEO_SUFFIXES:
+        return _json_error(
+            "Format non reconnu : choisis un MP4, MKV, WEBM ou MOV.", 400
+        )
+    try:
+        size = int(str(request.form.get("size") or "").strip())
+    except ValueError:
+        return _json_error("Taille de vidéo invalide.", 400)
+    if size <= 0:
+        return _json_error("Le fichier reçu est vide.", 400)
+    if size > MAX_UPLOAD_MB * 1_000_000:
+        return _json_error(
+            f"Vidéo trop lourde : la limite est de {MAX_UPLOAD_MB} Mo.", 413
+        )
+    clips = _parse_clips(request.form.get("clips"))
+    if isinstance(clips, str):
+        return _json_error(clips, 400)
+
+    try:
+        if _active_jobs_full():
+            return _json_error(
+                "Trop de traitements en attente. Réessaie dans quelques minutes.",
+                429,
+            )
+    except store.StoreError as exc:
+        return _json_error(f"Base de données indisponible : {exc}", 503)
+
+    token = storage.source_key(name).split("/")[1]
+    chunk_size = MAX_CHUNK_MB * 1_000_000
+    return jsonify(
+        token=token,
+        chunk_size=chunk_size,
+        chunks=max(1, math.ceil(size / chunk_size)),
+    )
+
+
+@app.post("/upload/chunk")
+def upload_chunk():
+    """Reçoit un morceau d'au plus MAX_CHUNK_MB et le range dans le bucket."""
+    if not CLOUD:
+        abort(404)
+
+    token = _upload_token()
+    if not token:
+        return _json_error("Jeton d'envoi invalide.", 400)
+    raw_index = str(request.form.get("index") or "").strip()
+    if not raw_index.isdigit() or not 0 <= int(raw_index) <= 999:
+        return _json_error("Numéro de morceau invalide.", 400)
+    chunk = request.files.get("chunk")
+    if chunk is None:
+        return _json_error("Morceau manquant.", 400)
+
+    key = f"{storage.SOURCE_PREFIX}/{token}/part-{int(raw_index):04d}.bin"
+    temp_dir = Path(tempfile.mkdtemp(prefix="clipmaker_chunk_"))
+    temp_path = temp_dir / "part.bin"
+    try:
+        chunk.save(str(temp_path))
+        if temp_path.stat().st_size == 0:
+            return _json_error("Morceau vide.", 400)
+        storage.upload_file(temp_path, key, content_type="application/octet-stream")
+    except OSError as exc:
+        return _json_error(f"Enregistrement impossible : {exc}", 500)
+    except storage.StorageError as exc:
+        return _json_error(f"Envoi impossible : {exc}", 503)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return jsonify(ok=True)
+
+
+@app.post("/upload/finish")
+def upload_finish():
+    """Tous les morceaux sont là : crée le job et déclenche le runner."""
+    if not CLOUD:
+        abort(404)
+
+    token = _upload_token()
+    if not token:
+        return _json_error("Jeton d'envoi invalide.", 400)
+    clips = _parse_clips(request.form.get("clips"))
+    if isinstance(clips, str):
+        return _json_error(clips, 400)
+    try:
+        size = int(str(request.form.get("size") or "").strip())
+    except ValueError:
+        size = 0
+
+    prefix = f"{storage.SOURCE_PREFIX}/{token}"
+    try:
+        parts = storage.list_objects(prefix)
+    except storage.StorageError as exc:
+        return _json_error(f"Stockage indisponible : {exc}", 503)
+    if not parts:
+        return _json_error("Aucun morceau reçu. Recommence l'envoi.", 400)
+
+    try:
+        job = store.create_job(f"{storage.UPLOAD_SCHEME}{prefix}/", clips)
+    except store.StoreError as exc:
+        try:
+            storage.delete_folder(prefix)
+        except storage.StorageError:
+            pass
+        return _json_error(f"Impossible de créer le traitement : {exc}", 503)
+
+    try:
+        store.append_log(
+            str(job["id"]),
+            f"Vidéo envoyée en {len(parts)} morceau(x) ({size / 1_000_000:.1f} Mo).",
+        )
+        store.append_log(str(job["id"]), dispatch_runner(str(job["id"])))
+    except store.StoreError:
+        pass
+    return jsonify(job_id=str(job["id"]))
+
+
 @app.get("/job/<job_id>")
 def job_page(job_id: str):
     if CLOUD:
@@ -695,6 +836,7 @@ def job_page(job_id: str):
             cloud=True,
             auth=bool(_app_password()),
             max_upload_mb=MAX_UPLOAD_MB,
+            chunk_size_bytes=MAX_CHUNK_MB * 1_000_000,
         )
 
     with JOBS_LOCK:
@@ -712,6 +854,7 @@ def job_page(job_id: str):
         cloud=False,
         auth=bool(_app_password()),
         max_upload_mb=MAX_UPLOAD_MB,
+            chunk_size_bytes=MAX_CHUNK_MB * 1_000_000,
     )
 
 
@@ -1021,38 +1164,67 @@ PAGE = """\
       <button type="submit">Envoyer et lancer</button>
     </form>
     <script>
-      // Évite d'envoyer 200 Mo pour découvrir ensuite que la limite est 45 Mo.
+      // Supabase plafonne à 50 Mo par fichier : la vidéo part en morceaux de
+      // {{ chunk_size_bytes / 1000000 }} Mo, réassemblés par le worker.
       (function () {
         var form = document.getElementById("upload_form");
         var input = document.getElementById("video");
         var info = document.getElementById("upload_info");
+        var clips = document.getElementById("upload_clips");
+        var button = form.querySelector("button[type=submit]");
         var limit = {{ max_upload_mb }};
+        var chunkSize = {{ chunk_size_bytes }};
+
+        function say(text, bad) {
+          info.textContent = text;
+          info.style.color = bad ? "#ff9a9a" : "";
+        }
         function check() {
           var file = input.files && input.files[0];
-          if (!file) { info.textContent = ""; return true; }
+          if (!file) { say("", false); return true; }
           var mb = file.size / 1000000;
           if (mb > limit) {
-            info.textContent = "Fichier : " + mb.toFixed(1)
-              + " Mo — trop lourd (limite " + limit
-              + " Mo). Compresse-le ou choisis un autre fichier.";
-            info.style.color = "#ff9a9a";
+            say("Fichier : " + mb.toFixed(1) + " Mo — trop lourd (limite " + limit + " Mo).", true);
             return false;
           }
-          info.textContent = "Fichier : " + mb.toFixed(1) + " Mo, prêt à envoyer.";
-          info.style.color = "";
+          say("Fichier : " + mb.toFixed(1) + " Mo — envoi en " + Math.ceil(file.size / chunkSize) + " morceau(x).", false);
           return true;
         }
+        async function post(url, fields, piece) {
+          var body = new FormData();
+          for (var key in fields) body.append(key, fields[key]);
+          if (piece) body.append("chunk", piece, "part.bin");
+          var response = await fetch(url, { method: "POST", body: body });
+          var data = {};
+          try { data = await response.json(); } catch (err) {}
+          if (!response.ok) throw new Error(data.error || ("Erreur " + response.status));
+          return data;
+        }
         input.addEventListener("change", check);
-        form.addEventListener("submit", function (event) {
-          if (!check()) {
-            event.preventDefault();
-            info.scrollIntoView({ block: "center" });
-            return;
-          }
-          var button = form.querySelector("button[type=submit]");
-          if (button) {
-            button.disabled = true;
-            button.textContent = "Envoi en cours… ne ferme pas la page";
+        form.addEventListener("submit", async function (event) {
+          event.preventDefault();
+          if (!check()) { info.scrollIntoView({ block: "center" }); return; }
+          var file = input.files[0];
+          button.disabled = true;
+          button.textContent = "Envoi en cours… ne ferme pas la page";
+          try {
+            var start = await post("/upload/start", {
+              name: file.name, size: file.size, clips: clips.value
+            });
+            for (var i = 0; i < start.chunks; i++) {
+              say("Envoi du morceau " + (i + 1) + " / " + start.chunks + "…", false);
+              var piece = file.slice(i * start.chunk_size, Math.min(file.size, (i + 1) * start.chunk_size));
+              await post("/upload/chunk", { token: start.token, index: i }, piece);
+            }
+            say("Vidéo envoyée, traitement lancé…", false);
+            var done = await post("/upload/finish", {
+              token: start.token, size: file.size, clips: clips.value
+            });
+            window.location = "/job/" + done.job_id;
+          } catch (err) {
+            say(err.message || "Envoi interrompu. Réessaie.", true);
+            button.disabled = false;
+            button.textContent = "Envoyer et lancer";
           }
         });
       })();

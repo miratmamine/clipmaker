@@ -198,26 +198,56 @@ def _clip_index(path: Path) -> int:
 
 def _source_from_storage(job: dict) -> Path | None:
     """Récupère la vidéo envoyée depuis le téléphone (``upload://…``)."""
-    key = storage.source_object(str(job.get("url") or ""))
+    url = str(job.get("url") or "")
+    key = storage.source_object(url)
     if not key:
         return None
 
-    name = Path(key).name or "video.mp4"
-    suffix = Path(name).suffix if Path(name).suffix in storage.VIDEO_SUFFIXES else ".mp4"
-    dest = WORK_DIR / f"upload_{str(job['id'])[:8]}{suffix}"
-    _log(f"      Vidéo envoyée depuis le téléphone : récupération de {name}...")
-    path = storage.download_file(key, dest)
-    _log(f"      Récupérée ({path.stat().st_size / 1_000_000:.1f} Mo).")
-    return path
+    dest = WORK_DIR / f"upload_{str(job['id'])[:8]}.mp4"
+    if storage.source_is_chunked(url):
+        # Supabase limite les fichiers à 50 Mo sur le plan gratuit : le
+        # navigateur envoie la vidéo en morceaux de 40 Mo qu'on réassemble ici.
+        prefix = storage.source_folder(url)
+        parts = sorted(
+            (part for part in storage.list_objects(prefix)
+             if str(part.get("name") or "").startswith("part-")
+             and str(part.get("name") or "").endswith(".bin")),
+            key=lambda part: str(part.get("name") or ""),
+        )
+        if not parts:
+            raise storage.StorageError("Aucun morceau de vidéo trouvé dans le stockage.")
+        _log(f"      Vidéo envoyée par morceaux : réassemblage de {len(parts)} parties...")
+        part_path = WORK_DIR / f"part_{str(job['id'])[:8]}.bin"
+        with dest.open("wb") as output:
+            for part in parts:
+                storage.download_file(f"{prefix}/{part['name']}", part_path)
+                with part_path.open("rb") as handle:
+                    shutil.copyfileobj(handle, output, 1 << 20)
+                part_path.unlink(missing_ok=True)
+    else:
+        name = Path(key).name or "video.mp4"
+        suffix = Path(name).suffix if Path(name).suffix in storage.VIDEO_SUFFIXES else ".mp4"
+        dest = WORK_DIR / f"upload_{str(job['id'])[:8]}{suffix}"
+        _log(f"      Vidéo envoyée depuis le téléphone : récupération de {name}...")
+        storage.download_file(key, dest)
+
+    _log(f"      Récupérée ({dest.stat().st_size / 1_000_000:.1f} Mo).")
+    return dest
 
 
 def _drop_source(job: dict) -> None:
     """Supprime la vidéo source du bucket (elle n'a plus d'utilité)."""
-    key = storage.source_object(str(job.get("url") or ""))
+    url = str(job.get("url") or "")
+    key = storage.source_object(url)
     if not key:
         return
     try:
-        storage.delete_file(key)
+        if storage.source_is_chunked(url):
+            prefix = storage.source_folder(url)
+            removed = storage.delete_folder(prefix)
+            _log(f"      Source supprimée ({removed} morceau(x)).")
+        else:
+            storage.delete_file(key)
     except storage.StorageError as exc:
         _log(f"      Vidéo source non supprimée : {exc}")
 

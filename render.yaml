@@ -39,9 +39,12 @@ services:
         value: "3600"
       - key: MAX_ACTIVE_JOBS
         value: "2"
-      # Vidéos envoyées depuis le téléphone (bucket Supabase = 50 Mo/fichier).
+      # Vidéos envoyées depuis le téléphone : envoi par morceaux de 40 Mo,
+      # réassemblés par le worker (Supabase plafonne à 50 Mo par fichier).
       - key: MAX_UPLOAD_MB
-        value: "45"
+        value: "500"
+      - key: MAX_CHUNK_MB
+        value: "40"
       # Déclenchement du runner GitHub Actions
       - key: GITHUB_REPO
         sync: false

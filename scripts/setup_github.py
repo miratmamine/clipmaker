@@ -322,7 +322,8 @@ def _write_render_env(full_name: str, token: str, values: dict[str, str]) -> Non
             "GITHUB_DISPATCH_EVENT=clipmaker-job",
             "SIGNED_URL_SECONDS=3600",
             "MAX_ACTIVE_JOBS=2",
-            "MAX_UPLOAD_MB=45",
+            "MAX_UPLOAD_MB=500",
+            "MAX_CHUNK_MB=40",
         ]
     )
     RENDER_ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")

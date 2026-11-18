@@ -159,10 +159,12 @@ le récupère depuis Storage. La vidéo source est supprimée dès la fin du job
 en cas de plantage du runner, elle est purgée après `SOURCE_RETENTION_DAYS`
 (3 jours par défaut).
 
-> - Limite : **50 Mo par fichier** dans Supabase Storage, donc
->   `MAX_UPLOAD_MB=45` par défaut (ajustable si le bucket est agrandi).
-> - La vidéo traverse deux fois la bande passante Render (envoi puis lecture par
->   le runner) : 5 Go/mois ≈ 2 h 30 de vidéo à 8 Mo/min.
+> - Le plan gratuit Supabase limite chaque fichier à **50 Mo**. Le navigateur
+>   découpe donc la vidéo en morceaux de `MAX_CHUNK_MB=40` Mo et le worker les
+>   réassemble : la limite totale est `MAX_UPLOAD_MB=500` Mo.
+> - La vidéo traverse trois fois la bande passante (vers Render, vers Supabase,
+>   puis vers le runner) : 5 Go/mois ≈ 3 vidéos de 500 Mo, ou ~8 de 200 Mo.
+>   Au-delà, attendre le mois suivant ou passer à un plan payant.
 > - Aucune dépendance à YouTube : c'est la méthode de secours permanente.
 
 ### B. Cookies YouTube (automatique)
@@ -297,7 +299,7 @@ Adresse publique : `https://<nom>.onrender.com`. En cas de doute, l'onglet
 | Render | 5 Go de bande passante/mois | chaque envoi de vidéo consomme ~2× sa taille |
 | GitHub Actions | 6 h max par job | une vidéo de plusieurs heures peut être coupée |
 | Supabase | pause après 7 jours sans activité | `/healthz` et le healthcheck Render génèrent de l'activité |
-| Supabase | 1 Go de stockage, bucket 50 Mo/fichier | un clip de 60 s pèse 6 à 10 Mo ; `MAX_UPLOAD_MB=45` |
+| Supabase | 1 Go de stockage, 50 Mo/fichier | envoi par morceaux de 40 Mo, vidéo totale `MAX_UPLOAD_MB=500` |
 | Groq | 7 200 s/h, 28 800 s/jour | privilégier des vidéos de moins d'une heure |
 
 Les runners GitHub utilisent des adresses IP de datacenter : YouTube bloque
@@ -314,7 +316,7 @@ le téléphone, les cookies, ou le worker du PC.
 | `Impossible de créer le traitement` | base injoignable ou en pause | réveiller le projet Supabase, vérifier `DATABASE_URL` |
 | Erreur `404 model_not_found` | modèle Groq retiré | mettre à jour `OPENAI_MODEL` |
 | « YouTube demande une vérification anti-robot » | IP de datacenter bloquée | envoyer la vidéo depuis le téléphone, ou `scripts/setup_cookies.py` |
-| « Vidéo trop lourde » | au-delà de `MAX_UPLOAD_MB` | compresser la vidéo (≤ 45 Mo) ou augmenter la limite du bucket |
+| « Vidéo trop lourde » | au-delà de `MAX_UPLOAD_MB` | réduire la vidéo (≤ 500 Mo) ; le quota bande passante Render peut aussi être épuisé |
 | Envoi bloqué vers Render | fichier trop gros / réseau coupé | réessayer en Wi-Fi ; vérifier l'espace Supabase |
 | Clip en `502` | URL signée expirée (1 h) | recharger la page du job |
 | « Configuration incomplète » sur la page d'accueil | `DATABASE_URL` absent dans Render | Environment → Add from .env (ou lier l'Env Group au service) |

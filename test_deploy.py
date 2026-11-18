@@ -46,7 +46,8 @@ for required in (
     assert env_vars[required].get("sync") is False, required
 # Render fournit PORT lui-même : le fichier .env ne doit pas l'écraser.
 assert "PORT" not in env_vars
-assert env_vars["MAX_UPLOAD_MB"]["value"] == "45"
+assert env_vars["MAX_UPLOAD_MB"]["value"] == "500"
+assert env_vars["MAX_CHUNK_MB"]["value"] == "40"
 print("   OK")
 
 print("2. workflow GitHub Actions")
@@ -149,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "DATABASE_URL=postgres://x" in content
     assert "GITHUB_REPO=moi/clipmaker" in content
     assert "GITHUB_DISPATCH_TOKEN=jeton" in content
-    assert "MAX_UPLOAD_MB=45" in content
+    assert "MAX_UPLOAD_MB=500" in content
 print("   OK")
 
 print("6. setup_cookies : validation du fichier Netscape")

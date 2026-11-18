@@ -516,6 +516,7 @@ assert home.status_code == 200
 assert 'id="upload_info"' in home.get_data(as_text=True)
 assert "trop lourd" in home.get_data(as_text=True)
 assert f"var limit = {webapp.MAX_UPLOAD_MB};" in home.get_data(as_text=True)
+assert f"var chunkSize = {webapp.MAX_CHUNK_MB * 1_000_000};" in home.get_data(as_text=True)
 
 # Sur Render, avant que render-env.txt soit collé : le service doit démarrer et
 # afficher une explication, pas planter sur l'import de yt-dlp.
@@ -659,6 +660,51 @@ assert Path(str(sources[-1])).parent == worker.WORK_DIR
 assert store.get_job(upload_id)["status"] == "done"
 assert upload_key not in StorageHandler.uploads, "la vidéo source devrait être supprimée"
 assert upload_key in StorageHandler.deletes
+print("   OK")
+
+print("6c-bis. Envoi par morceaux (vidéo jusqu'à 500 Mo)")
+saved_jobs_limit = os.environ.get("MAX_ACTIVE_JOBS", "2")
+os.environ["MAX_ACTIVE_JOBS"] = "99"
+try:
+    total = webapp.MAX_CHUNK_MB * 1_000_000 * 2 + 1234
+    started = client.post(
+        "/upload/start",
+        data={"name": "grosse video.mp4", "size": str(total), "clips": "1"},
+    )
+    assert started.status_code == 200, started.data[:200]
+    meta = started.json
+    assert meta["chunks"] == 3, meta
+    token = meta["token"]
+    for index, blob in enumerate((b"morceau-0", b"morceau-1", b"morceau-2")):
+        piece = client.post(
+            "/upload/chunk",
+            data={
+                "token": token,
+                "index": str(index),
+                "chunk": (io.BytesIO(blob), "part.bin"),
+            },
+            content_type="multipart/form-data",
+        )
+        assert piece.status_code == 200, piece.data[:200]
+    prefix = f"sources/{token}"
+    assert len([k for k in StorageHandler.uploads if k.startswith(prefix)]) == 3
+    finished = client.post(
+        "/upload/finish",
+        data={"token": token, "size": str(total), "clips": "1"},
+    )
+    assert finished.status_code == 200, finished.data[:200]
+    chunked_job = store.get_job(str(finished.json["job_id"]))
+    assert chunked_job is not None
+    assert chunked_job["url"] == f"{storage.UPLOAD_SCHEME}{prefix}/"
+    assert storage.source_is_chunked(chunked_job["url"])
+
+    assembled = worker._source_from_storage(chunked_job)
+    assert assembled is not None
+    assert assembled.read_bytes() == b"morceau-0morceau-1morceau-2"
+    worker._drop_source(chunked_job)
+    assert not any(k.startswith(prefix) for k in StorageHandler.uploads)
+finally:
+    os.environ["MAX_ACTIVE_JOBS"] = saved_jobs_limit
 print("   OK")
 
 print("6d. Purge des vidéos envoyées orphelines")

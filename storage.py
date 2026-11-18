@@ -130,6 +130,29 @@ def source_object(url: str) -> str:
     return text[len(UPLOAD_SCHEME) :].strip()
 
 
+def source_is_chunked(url: str) -> bool:
+    """Vrai pour une vidéo envoyée en morceaux (clé se terminant par ``/``)."""
+    return source_object(url).endswith("/")
+
+
+def source_folder(url: str) -> str:
+    """Préfixe ``sources/<jeton>`` des morceaux ou de la vidéo unitaire."""
+    key = source_object(url).rstrip("/")
+    return key if key.startswith(f"{SOURCE_PREFIX}/") else ""
+
+
+def delete_folder(prefix: str) -> int:
+    """Supprime tous les objets sous un préfixe ; retourne leur nombre."""
+    removed = 0
+    for item in list_objects(prefix):
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        delete_file(f"{prefix.rstrip('/')}/{name}")
+        removed += 1
+    return removed
+
+
 def upload_file(
     path: str | Path, key: str, content_type: str = "video/mp4"
 ) -> str:
